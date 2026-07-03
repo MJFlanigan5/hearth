@@ -904,13 +904,16 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
   },[activePanelId]);
 
   const [dmChoreConfetti,setDmChoreConfetti]=useState(false);
+  const _choreSubmitting=useRef(new Set());
   const toggleChore=async id=>{
+    if(_choreSubmitting.current.has(id)) return;
+    _choreSubmitting.current.add(id);
     try{
       const result=await api.put(`/api/chores/${id}/done`);
       if(result.error) return;
       setChores(p=>p.map(c=>c.id===id?{...c,done:result.done,next_due:result.next_due,status:result.status}:c));
       if(result.completed||result.done){setDmChoreConfetti(true);setTimeout(()=>setDmChoreConfetti(false),2500);}
-    }catch(e){}
+    }catch(e){}finally{_choreSubmitting.current.delete(id);}
   };
 
   const todayDinner=()=>{
@@ -5930,7 +5933,14 @@ function MessagesScreen({messages,setMessages,members=[],toastAdd}){
 
   const post=async()=>{
     if(!text.trim()){toastAdd('Message cannot be empty','red');return;}
-    const r=await api.post('/api/messages',{text:text.trim(),author:author||undefined,member_id:memberId?Number(memberId):undefined,expiry_preset:expiry}).catch(()=>null);
+    let expiresAt=undefined;
+    if(expiry==='eod'||expiry==='tomorrow'){
+      const now=new Date();
+      const midnight=new Date(now.getFullYear(),now.getMonth(),now.getDate()+1,0,0,0,0);
+      if(expiry==='tomorrow') midnight.setDate(midnight.getDate()+1);
+      expiresAt=midnight.toISOString();
+    }
+    const r=await api.post('/api/messages',{text:text.trim(),author:author||undefined,member_id:memberId?Number(memberId):undefined,expiry_preset:expiry,...(expiresAt?{expires_at:expiresAt}:{})}).catch(()=>null);
     if(!r?.id){toastAdd(r?.error||'Failed to post','red');return;}
     setMessages(p=>[r,...p]);
     setDrawerOpen(false);setText('');setAuthor('');setMemberId('');setExpiry('4h');
@@ -8716,8 +8726,10 @@ function ManageMode({onDisplay,onLogout,events,setEvents,chores,setChores,grocer
     const subMatches=(subscriptions||[]).filter(s=>match(s.name)||match(s.notes)).slice(0,3).map(s=>({type:'Subscriptions',label:s.name,screen:'subscriptions'}));
     const projMatches=(projects||[]).filter(p=>match(p.title)||match(p.description)).slice(0,3).map(p=>({type:'Projects',label:p.title,screen:'projects'}));
     const pantryMatches=(pantry||[]).filter(p=>match(p.name)).slice(0,3).map(p=>({type:'Pantry',label:p.name,screen:'pantry'}));
-    return [...noteMatches,...contactMatches,...recipeMatches,...choreMatches,...subMatches,...projMatches,...pantryMatches];
-  },[globalSearch,notes,contacts,recipes,chores,subscriptions,projects,pantry]);
+    const calMatches=(events||[]).filter(e=>match(e.title)||match(e.notes)).slice(0,3).map(e=>({type:'Calendar',label:e.title,screen:'calendar'}));
+    const groceryMatches=(grocery||[]).filter(g=>match(g.name)||match(g.category)).slice(0,3).map(g=>({type:'Grocery',label:g.name,screen:'grocery'}));
+    return [...noteMatches,...contactMatches,...recipeMatches,...choreMatches,...subMatches,...projMatches,...pantryMatches,...calMatches,...groceryMatches];
+  },[globalSearch,notes,contacts,recipes,chores,subscriptions,projects,pantry,events,grocery]);
   useEffect(()=>{
     const ping=()=>api.get('/api/uptime').then(()=>setServerUp(true)).catch(()=>setServerUp(false));
     ping();
@@ -8965,7 +8977,7 @@ function LoginOverlay({onLogin,onKiosk}){
   const [setupNeeded,setSetupNeeded]=useState(false);
 
   useEffect(()=>{
-    fetch('/api/members').then(r=>r.json()).then(d=>{if(Array.isArray(d))setMembers(d);}).catch(()=>{});
+    fetch('/api/members/public').then(r=>r.json()).then(d=>{if(Array.isArray(d))setMembers(d);}).catch(()=>{});
     fetch('/api/auth/setup-status').then(r=>r.json()).then(s=>{
       if(!s.configured) setSetupNeeded(true);
     }).catch(()=>{});

@@ -222,8 +222,11 @@ function addMonths(d) {
   d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
 }
 
-function computeNextDue(recurrence) {
-  const d = new Date();
+function computeNextDue(recurrence, fromDate) {
+  // Use fromDate (chore's current next_due) as base so missed chores
+  // advance from their scheduled date rather than from now.
+  const base = fromDate ? new Date(fromDate + 'T00:00:00') : new Date();
+  const d = new Date(Math.max(base.getTime(), new Date().setHours(0,0,0,0)));
   if (recurrence.startsWith('Daily'))       d.setDate(d.getDate() + 1);
   else if (recurrence.startsWith('Bi-w'))   d.setDate(d.getDate() + 14);
   else if (recurrence.startsWith('Month'))  addMonths(d);
@@ -407,17 +410,24 @@ app.get('/api/events', requireAuth, (req, res) => {
   const today = new Date();
   const pad = n => String(n).padStart(2,'0');
   const billRows = db.prepare('SELECT * FROM bills WHERE active=1').all();
+  const paidBillSet = new Set(
+    db.prepare('SELECT bill_id, period FROM bill_payments').all().map(p => `${p.bill_id}_${p.period}`)
+  );
   const billEvents = [];
   for (const b of billRows) {
     if (b.recurrence === 'monthly') {
       for (let m = 0; m < 3; m++) {
         const d = new Date(today.getFullYear(), today.getMonth() + m, Math.min(b.due_day || 1, 28));
         const ds = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+        const period = `${d.getFullYear()}-${pad(d.getMonth()+1)}`;
+        if (paidBillSet.has(`${b.id}_${period}`)) continue;
         billEvents.push({ id:`bill_${b.id}_${ds}`, title:b.name, date:ds, time:'All day', end_time:'', duration:'1h', calendar:'bills', color:b.color||'#3B82F6', notes:b.amount>0?`$${Number(b.amount).toFixed(2)}`:'', source:'bill', member_id:null, recurring_rule:'' });
       }
     } else if (b.due_date) {
       const dueMs = new Date(b.due_date + 'T00:00:00').getTime();
       if (dueMs >= new Date(today.getFullYear(), today.getMonth(), 1).getTime()) {
+        const period = b.recurrence === 'annual' ? String(today.getFullYear()) : b.due_date;
+        if (paidBillSet.has(`${b.id}_${period}`)) continue;
         billEvents.push({ id:`bill_${b.id}_${b.due_date}`, title:b.name, date:b.due_date, time:'All day', end_time:'', duration:'1h', calendar:'bills', color:b.color||'#3B82F6', notes:b.amount>0?`$${Number(b.amount).toFixed(2)}`:'', source:'bill', member_id:null, recurring_rule:'' });
       }
     }
@@ -506,14 +516,18 @@ app.delete('/api/events/:id', requireAuth, (req, res) => {
   if (scope === 'one' || !ev.recurring_rule) {
     db.prepare('DELETE FROM events WHERE id=?').run(ev.id);
   } else {
-    const seriesId = ev.external_id || ev.id;
+    // Find the series root: it's the event with no external_id (external_id IS NULL or '')
+    // for internally-created series, or the first event whose id matches external_id of children.
+    // Use row IDs only to avoid mixing ICS UIDs with row IDs.
+    const rootEvent = (!ev.external_id || ev.external_id === '')
+      ? ev
+      : db.prepare('SELECT * FROM events WHERE id=?').get(Number(ev.external_id)) || ev;
+    const rootId = rootEvent.id;
     if (scope === 'all') {
-      db.prepare('DELETE FROM events WHERE id=? OR external_id=?').run(seriesId, seriesId);
+      db.prepare('DELETE FROM events WHERE id=? OR external_id=?').run(rootId, String(rootId));
     } else if (scope === 'future') {
-      // Don't include id=seriesId — that would delete the root event even when deleting from a later child
-      db.prepare('DELETE FROM events WHERE external_id=? AND date>=?').run(seriesId, ev.date);
-      // Also delete the root if it's the selected event itself
-      if (ev.id === seriesId) db.prepare('DELETE FROM events WHERE id=?').run(seriesId);
+      db.prepare('DELETE FROM events WHERE external_id=? AND date>=?').run(String(rootId), ev.date);
+      if (ev.id === rootId) db.prepare('DELETE FROM events WHERE id=?').run(rootId);
     }
   }
   res.json({ ok: true });
@@ -590,7 +604,7 @@ app.put('/api/chores/:id/done', requireAuth, (req, res) => {
   const done = isRecurring ? 1 : (c.done ? 0 : 1);
   const todayISO = localDate();
   const todayDisplay = new Date().toLocaleDateString('en-US', { month:'short', day:'numeric' });
-  const nextDue = done ? computeNextDue(c.recurrence) : todayISO;
+  const nextDue = done ? computeNextDue(c.recurrence, c.next_due) : todayISO;
   const lastDone = done ? todayDisplay : c.last_done;
   const newStreak = done ? (c.streak || 0) + 1 : Math.max(0, (c.streak || 0) - 1);
   // Recurring chores: reset done=0 immediately after logging — they advance to next cycle
@@ -640,6 +654,7 @@ app.delete('/api/chores/:id', requireAdmin, (req, res) => {
   if (!id) return res.status(400).json({ error: 'Invalid id' });
   const chore = db.prepare('SELECT id FROM chores WHERE id=?').get(id);
   if (!chore) return res.status(404).json({ error: 'Not found' });
+  db.prepare('DELETE FROM chore_completions WHERE chore_id=?').run(id);
   db.prepare('DELETE FROM chores WHERE id=?').run(id);
   res.json({ ok: true });
 });
@@ -687,9 +702,14 @@ app.post('/api/grocery', requireAuth, (req, res) => {
 app.put('/api/grocery/:id', requireAuth, (req, res) => {
   const item = db.prepare('SELECT * FROM grocery WHERE id=?').get(req.params.id);
   if (!item) return res.status(404).json({ error: 'Not found' });
-  const { qty } = req.body || {};
-  db.prepare('UPDATE grocery SET qty=? WHERE id=?').run(qty ?? item.qty, req.params.id);
-  res.json({ ...item, qty: qty ?? item.qty });
+  const { qty, name, category } = req.body || {};
+  db.prepare('UPDATE grocery SET qty=?,name=?,category=? WHERE id=?').run(
+    qty ?? item.qty,
+    name?.trim() || item.name,
+    category || item.category,
+    req.params.id
+  );
+  res.json({ ...item, qty: qty ?? item.qty, name: name?.trim() || item.name, category: category || item.category });
 });
 
 app.put('/api/grocery/:id/toggle', requireAuth, (req, res) => {
@@ -1371,6 +1391,10 @@ app.delete('/api/countdowns/:id', requireAuth, (req, res) => {
 });
 
 // ── Routes: Family Members ────────────────────────────────────────────────────
+app.get('/api/members/public', (req, res) => {
+  res.json(db.prepare('SELECT id, name, color, avatar FROM family_members ORDER BY created_at').all());
+});
+
 app.get('/api/members', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM family_members ORDER BY created_at').all());
 });
@@ -3630,7 +3654,7 @@ app.get('/api/budget', requireAuth, (req, res) => {
   const categories = db.prepare('SELECT * FROM budget_categories ORDER BY name').all();
   const now = new Date();
   const monthStart = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`;
-  const monthEnd = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-31`;
+  const monthEnd = db.prepare(`SELECT date(?, '+1 month', '-1 day') as d`).get(monthStart).d;
   const entries = db.prepare('SELECT * FROM budget_entries WHERE date >= ? AND date <= ? ORDER BY date DESC').all(monthStart, monthEnd);
   res.json({ categories, entries });
 });
@@ -3780,10 +3804,13 @@ app.get('/api/messages', requireAuth, (req, res) => {
 });
 
 app.post('/api/messages', requireAuth, (req, res) => {
-  const { text, author='', member_id=null, expiry_preset='4h' } = req.body || {};
+  const { text, author='', member_id=null, expiry_preset='4h', expires_at: clientExpiry } = req.body || {};
   if (!text?.trim()) return res.status(400).json({ error: 'text required' });
   let expires_at;
-  if (expiry_preset === 'eod') {
+  if (clientExpiry) {
+    // Client can send a precomputed ISO timestamp (for eod/tomorrow which are timezone-sensitive)
+    expires_at = clientExpiry;
+  } else if (expiry_preset === 'eod') {
     expires_at = db.prepare(`SELECT datetime('now', 'start of day', '+1 day') as t`).get().t;
   } else if (expiry_preset === 'tomorrow') {
     expires_at = db.prepare(`SELECT datetime('now', 'start of day', '+2 days') as t`).get().t;
