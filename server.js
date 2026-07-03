@@ -3150,28 +3150,8 @@ app.post('/api/email/inbound', inboundRateLimit, async (req, res) => {
     }
   })();
 
-  if (pkg?.is_shipping) {
-    db.transaction(() => {
-      const pkgExists = pkg.tracking_number
-        ? db.prepare('SELECT id FROM packages WHERE tracking_number=?').get(pkg.tracking_number)
-        : db.prepare('SELECT id FROM packages WHERE source_subject=?').get(subject || '');
-      if (!pkgExists) {
-        db.prepare('INSERT INTO packages (carrier,tracking_number,description,expected_date,source_subject) VALUES (?,?,?,?,?)')
-          .run(pkg.carrier || '', pkg.tracking_number || '', pkg.description || '', pkg.expected_date || '', subject || '');
-        broadcastSSE('packages', { action: 'reload' });
-      }
-    })();
-  }
-
-  if (bill?.is_bill && bill.payee) {
-    const billExists = db.prepare('SELECT id FROM bills WHERE name=? AND recurrence=? AND active=1').get(bill.payee, bill.recurrence || 'monthly');
-    if (!billExists) {
-      const dueDay = bill.due_date ? (parseInt(bill.due_date.split('-')[2]) || 1) : 1;
-      db.prepare('INSERT INTO bills (name,amount,due_day,due_date,recurrence) VALUES (?,?,?,?,?)')
-        .run(bill.payee, Number(bill.amount) || 0, dueDay, bill.due_date || '', bill.recurrence || 'monthly');
-      broadcastSSE('bills', { action: 'reload' });
-    }
-  }
+  if (pkg?.is_shipping) upsertPackage(pkg, subject || '');
+  insertBill(bill);
 
   res.json({ ok: true });
 });
@@ -4670,6 +4650,47 @@ const _uidMark = (uid, mailbox = 'INBOX') => {
   try { db.prepare('INSERT OR IGNORE INTO imap_processed_uids (uid,mailbox) VALUES (?,?)').run(uid, mailbox); } catch {}
 };
 function stripHtml(html) { return html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi,'').replace(/<style[^>]*>[\s\S]*?<\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim(); }
+
+// Dedup helpers — called from webhook, pollImap, and scanImap30Days
+function upsertPackage(pkg, subject) {
+  if (pkg.tracking_number) {
+    const byTracking = db.prepare('SELECT id FROM packages WHERE tracking_number=?').get(pkg.tracking_number);
+    if (byTracking) return false;
+    // Upgrade a subject-only entry to include the tracking number
+    const bySubject = db.prepare('SELECT id FROM packages WHERE source_subject=? AND (tracking_number IS NULL OR tracking_number="")').get(subject);
+    if (bySubject) {
+      db.prepare('UPDATE packages SET tracking_number=?,carrier=?,expected_date=? WHERE id=?')
+        .run(pkg.tracking_number, pkg.carrier || '', pkg.expected_date || '', bySubject.id);
+      broadcastSSE('packages', { action: 'reload' });
+      return false; // updated, not inserted
+    }
+  } else {
+    if (db.prepare('SELECT id FROM packages WHERE source_subject=?').get(subject)) return false;
+  }
+  db.prepare('INSERT INTO packages (carrier,tracking_number,description,expected_date,source_subject) VALUES (?,?,?,?,?)')
+    .run(pkg.carrier || '', pkg.tracking_number || '', pkg.description || subject, pkg.expected_date || '', subject);
+  broadcastSSE('packages', { action: 'reload' });
+  return true;
+}
+
+function normBillName(name) {
+  return name.toLowerCase().replace(/\.(com|net|org|io|co)$/i, '').replace(/\s+/g, ' ').trim();
+}
+function billExists(payee, recurrence) {
+  const norm = normBillName(payee);
+  return db.prepare(`SELECT id FROM bills WHERE recurrence=? AND active=1
+    AND (lower(name)=lower(?) OR lower(replace(replace(replace(replace(replace(name,'.com',''),'.net',''),'.org',''),'.io',''),'.co',''))=?)`
+  ).get(recurrence || 'monthly', payee, norm);
+}
+function insertBill(bill) {
+  if (!bill?.is_bill || !bill.payee) return false;
+  if (billExists(bill.payee, bill.recurrence)) return false;
+  const dueDay = bill.due_date ? (parseInt(bill.due_date.split('-')[2]) || 1) : 1;
+  db.prepare('INSERT INTO bills (name,amount,due_day,due_date,recurrence) VALUES (?,?,?,?,?)')
+    .run(bill.payee, Number(bill.amount) || 0, dueDay, bill.due_date || '', bill.recurrence || 'monthly');
+  broadcastSSE('bills', { action: 'reload' });
+  return true;
+}
 const SHIPPING_RE = /\b(ship(?:ped|ping|ment)?|track(?:ing)?|deliver(?:y|ed|ing)?|package|dispatch(?:ed)?|arrival|in transit|out for delivery)\b/i;
 const BILL_RE = /\b(bill|statement|invoice|payment due|amount due|minimum payment|your balance|autopay|auto-pay|past due|balance due)\b/i;
 const APPT_RE = /\b(appointment|reservation|itinerary|check.in|boarding pass|your flight|your hotel|your trip|your stay|rsvp|your reservation|your booking|your event)\b/i;
@@ -4712,15 +4733,8 @@ async function pollImap() {
           ]);
           console.log(`[imap] shipping → AI pkg: ${JSON.stringify(pkg)}`);
           if (pkg?.is_shipping) {
-            const exists = pkg.tracking_number
-              ? db.prepare('SELECT id FROM packages WHERE tracking_number=?').get(pkg.tracking_number)
-              : db.prepare('SELECT id FROM packages WHERE source_subject=?').get(subject);
-            if (!exists) {
-              db.prepare('INSERT INTO packages (carrier,tracking_number,description,expected_date,source_subject) VALUES (?,?,?,?,?)')
-                .run(pkg.carrier || '', pkg.tracking_number || '', pkg.description || subject, pkg.expected_date || '', subject);
-              broadcastSSE('packages', { action: 'reload' });
-              console.log(`[imap] inserted package: ${pkg.carrier} ${pkg.tracking_number}`);
-            } else { console.log(`[imap] package duplicate, skipped`); }
+            const inserted = upsertPackage(pkg, subject);
+            console.log(`[imap] package: ${inserted ? 'inserted' : 'duplicate/updated'} ${pkg.carrier} ${pkg.tracking_number}`);
           } else { console.log(`[imap] AI said not shipping`); }
           if (result?.event_name && result?.event_date) {
             const dupInbox = db.prepare("SELECT id FROM inbox WHERE subject=? OR (event_name=? AND event_date=? AND event_name!='')").get(subject, result.event_name, result.event_date);
@@ -4733,16 +4747,7 @@ async function pollImap() {
         } else if (isBill) {
           const bill = await callAiForBill(subject, body).catch(e => { console.error('[imap] bill AI error:', e?.message); return null; });
           console.log(`[imap] bill → AI: ${JSON.stringify(bill)}`);
-          if (bill?.is_bill && bill.payee) {
-            const exists = db.prepare('SELECT id FROM bills WHERE name=? AND recurrence=? AND active=1').get(bill.payee, bill.recurrence || 'monthly');
-            if (!exists) {
-              const dueDay = bill.due_date ? (parseInt(bill.due_date.split('-')[2]) || 1) : 1;
-              db.prepare('INSERT INTO bills (name,amount,due_day,due_date,recurrence) VALUES (?,?,?,?,?)')
-                .run(bill.payee, Number(bill.amount) || 0, dueDay, bill.due_date || '', bill.recurrence || 'monthly');
-              broadcastSSE('bills', { action: 'reload' });
-              console.log(`[imap] inserted bill: ${bill.payee}`);
-            }
-          }
+          if (insertBill(bill)) console.log(`[imap] inserted bill: ${bill.payee}`);
         } else if (isAppt) {
           const result = await callAiForEvent(subject, body).catch(() => null);
           if (result?.event_name && result?.event_date) {
@@ -4826,16 +4831,7 @@ async function scanImap30Days() {
           callAiForPackage(subject, body).catch(() => null),
           callAiForEvent(subject, body).catch(() => null),
         ]);
-        if (pkg?.is_shipping) {
-          const exists = pkg.tracking_number
-            ? db.prepare('SELECT id FROM packages WHERE tracking_number=?').get(pkg.tracking_number)
-            : db.prepare('SELECT id FROM packages WHERE source_subject=?').get(subject);
-          if (!exists) {
-            db.prepare('INSERT INTO packages (carrier,tracking_number,description,expected_date,source_subject) VALUES (?,?,?,?,?)')
-              .run(pkg.carrier || '', pkg.tracking_number || '', pkg.description || subject, pkg.expected_date || '', subject);
-            summary.packages++;
-          }
-        }
+        if (pkg?.is_shipping && upsertPackage(pkg, subject)) summary.packages++;
         // only add shipping emails to inbox if there's an actual calendar event (e.g. a delivery date confirmation)
         if (evt?.event_name && evt?.event_date) {
           const dup = db.prepare("SELECT id FROM inbox WHERE subject=? OR (event_name=? AND event_date=? AND event_name!='')").get(subject, evt.event_name, evt.event_date);
@@ -4847,14 +4843,8 @@ async function scanImap30Days() {
         }
       } else if (isBill) {
         const bill = await callAiForBill(subject, body).catch(() => null);
-        if (bill?.is_bill && bill.payee) {
-          const exists = db.prepare('SELECT id FROM bills WHERE name=? AND recurrence=? AND active=1').get(bill.payee, bill.recurrence || 'monthly');
-          if (!exists) {
-            const dueDay = bill.due_date ? (parseInt(bill.due_date.split('-')[2]) || 1) : 1;
-            db.prepare('INSERT INTO bills (name,amount,due_day,due_date,recurrence) VALUES (?,?,?,?,?)')
-              .run(bill.payee, Number(bill.amount) || 0, dueDay, bill.due_date || '', bill.recurrence || 'monthly');
-            summary.bills++;
-          }
+        if (insertBill(bill)) {
+          summary.bills++;
         }
       } else if (isAppt) {
         const result = await callAiForEvent(subject, body).catch(() => null);
