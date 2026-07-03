@@ -3808,8 +3808,12 @@ app.post('/api/messages', requireAuth, (req, res) => {
   if (!text?.trim()) return res.status(400).json({ error: 'text required' });
   let expires_at;
   if (clientExpiry) {
-    // Client can send a precomputed ISO timestamp (for eod/tomorrow which are timezone-sensitive)
-    expires_at = clientExpiry;
+    // Normalize ISO string → SQLite UTC datetime so client-side `.replace(' ','T')+'Z'` parsing works
+    const dt = new Date(clientExpiry);
+    const pad = n => String(n).padStart(2, '0');
+    expires_at = isNaN(dt.getTime())
+      ? db.prepare(`SELECT datetime('now', '+4 hours') as t`).get().t
+      : `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth()+1)}-${pad(dt.getUTCDate())} ${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}:${pad(dt.getUTCSeconds())}`;
   } else if (expiry_preset === 'eod') {
     expires_at = db.prepare(`SELECT datetime('now', 'start of day', '+1 day') as t`).get().t;
   } else if (expiry_preset === 'tomorrow') {
