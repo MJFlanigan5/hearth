@@ -34,11 +34,12 @@ function daysUntil(dateStr){
 
 /* ── API helper ──────────────────────────────────────────────────────── */
 const _authHdr=()=>{const t=localStorage.getItem('kith_token');return t?{'Authorization':`Bearer ${t}`}:{};};
+const _parseRes=r=>r.ok?r.json():r.json().catch(()=>({})).then(b=>{throw Object.assign(new Error(b?.error||`HTTP ${r.status}`),{status:r.status,body:b});});
 const api={
-  get:(path)=>fetch(path,{headers:{..._authHdr()}}).then(r=>r.json()),
-  post:(path,data)=>fetch(path,{method:'POST',headers:{'Content-Type':'application/json',..._authHdr()},body:JSON.stringify(data)}).then(r=>r.json()),
-  put:(path,data)=>fetch(path,{method:'PUT',headers:{'Content-Type':'application/json',..._authHdr()},body:JSON.stringify(data)}).then(r=>r.json()),
-  del:(path)=>fetch(path,{method:'DELETE',headers:{..._authHdr()}}).then(r=>r.json()),
+  get:(path)=>fetch(path,{headers:{..._authHdr()}}).then(_parseRes),
+  post:(path,data)=>fetch(path,{method:'POST',headers:{'Content-Type':'application/json',..._authHdr()},body:JSON.stringify(data)}).then(_parseRes),
+  put:(path,data)=>fetch(path,{method:'PUT',headers:{'Content-Type':'application/json',..._authHdr()},body:JSON.stringify(data)}).then(_parseRes),
+  del:(path)=>fetch(path,{method:'DELETE',headers:{..._authHdr()}}).then(_parseRes),
 };
 
 /* ── Time formatting helper ─────────────────────────────────────────── */
@@ -683,7 +684,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
     const es=new EventSource(`/api/events/stream?token=${encodeURIComponent(_sseToken)}`);
     es.addEventListener('activity',e=>{try{const ev=JSON.parse(e.data);setSmEvents(p=>[ev,...p].slice(0,10));}catch{}});
     es.addEventListener('refresh',()=>{loadHA();loadSm();loadWidgets();});
-    es.addEventListener('grocery',e=>{try{const d=JSON.parse(e.data);if(setGrocery){if(d.action==='add')setGrocery(p=>[...p,d.item]);else if(d.action==='remove')setGrocery(p=>p.filter(i=>i.id!==d.id));else if(d.action==='toggle')setGrocery(p=>p.map(i=>i.id===d.id?{...i,checked:d.checked}:i));else if(d.action==='clear_checked')setGrocery(p=>p.filter(i=>!i.checked));}}catch{}});
+    es.addEventListener('grocery',e=>{try{const d=JSON.parse(e.data);if(setGrocery){if(d.action==='add')setGrocery(p=>[...p,d.item]);else if(d.action==='remove')setGrocery(p=>p.filter(i=>i.id!==d.id));else if(d.action==='toggle'){if(!d.checked){/* another device un-checked — cancel pending delete timer */const rt=window.__groceryRemoveTimers;if(rt){clearTimeout(rt[d.id]);clearTimeout(rt[`${d.id}_fade`]);delete rt[d.id];delete rt[`${d.id}_fade`];}}setGrocery(p=>p.map(i=>i.id===d.id?{...i,checked:d.checked}:i));}else if(d.action==='clear_checked')setGrocery(p=>p.filter(i=>!i.checked));}}catch{}});
     es.addEventListener('packages',()=>{
       api.get('/api/packages').then(d=>{if(Array.isArray(d)&&setPackages)setPackages(d);}).catch(()=>{});
     });
@@ -3339,6 +3340,7 @@ function ChoresScreen({chores,setChores,goals=[],members=[],toastAdd}){
   const [tab,setTab]=useState('chores');
   const [choreHistory,setChoreHistory]=useState([]);
   const [photoChoreId,setPhotoChoreId]=useState(null);
+  const _submitting=useRef(new Set());
   const [photoFile,setPhotoFile]=useState(null);
   useEffect(()=>{
     if(tab==='history') api.get('/api/chores/history?limit=50').then(d=>Array.isArray(d)&&setChoreHistory(d)).catch(()=>{});
@@ -3396,6 +3398,8 @@ function ChoresScreen({chores,setChores,goals=[],members=[],toastAdd}){
   };
 
   const toggleDone=async c=>{
+    if(_submitting.current.has(c.id)) return;
+    _submitting.current.add(c.id);
     try{
       const result=await api.put(`/api/chores/${c.id}/done`);
       if(result.error){toastAdd(result.error,'red');return;}
@@ -3408,6 +3412,7 @@ function ChoresScreen({chores,setChores,goals=[],members=[],toastAdd}){
         setPhotoFile(null);
       }
     }catch{toastAdd('Failed to update','red');}
+    finally{_submitting.current.delete(c.id);}
   };
 
   const submitChorePhoto=async()=>{
@@ -3685,7 +3690,7 @@ function GroceryScreen({grocery,setGrocery,meals,setMeals,recipes=[],toastAdd}){
   const [aiMealLoading,setAiMealLoading]=useState(false);
   const [dietaryProfile,setDietaryProfile]=useState({goal:'',restrictions:''});
 
-  useEffect(()=>()=>{Object.values(removeTimers.current).forEach(clearTimeout)},[]);
+  useEffect(()=>{window.__groceryRemoveTimers=removeTimers.current;return()=>{window.__groceryRemoveTimers=null;Object.values(removeTimers.current).forEach(clearTimeout);};},[]);
   useEffect(()=>{api.get('/api/grocery/history').then(r=>Array.isArray(r)&&setHistory(r)).catch(()=>{});},[]);
   useEffect(()=>{api.get('/api/settings').then(s=>{setDietaryProfile({goal:s.dietary_goal||'',restrictions:s.dietary_restrictions||''});}).catch(()=>{});},[]);
 
@@ -6715,14 +6720,14 @@ function BudgetScreen({budget,setBudget,toastAdd}){
               const r=await api.post('/api/budget/import/preview',{csv:text});
               if(r?.error){toastAdd(r.error,'red');return;}
               setImportDetected(r.detected);
-              setImportRows({rows:r.sample,all:r.all,total:r.total});
+              setImportRows({rows:r.sample,all:r.all,total:r.total,skipped:r.skipped||0});
             }catch{toastAdd('Failed to parse CSV','red');}
             finally{setImportLoading(false);}
           }} style={{width:'100%',marginBottom:12}}/>
           {importLoading&&<div style={{fontSize:13,color:A.label4}}>Parsing…</div>}
           {importRows&&(
             <>
-              <div style={{fontSize:12,color:A.label4,marginBottom:8}}>Detected: <strong style={{color:A.label2}}>{importDetected}</strong> — {importRows.total} expense row{importRows.total!==1?'s':''} this month</div>
+              <div style={{fontSize:12,color:A.label4,marginBottom:8}}>Detected: <strong style={{color:A.label2}}>{importDetected}</strong> — {importRows.total} expense row{importRows.total!==1?'s':''} this month{importRows.skipped>0?<span style={{color:'#F59E0B'}}> · {importRows.skipped} skipped (outside current month)</span>:null}</div>
               {importRows.rows.length>0&&(
                 <div style={{background:A.inputBg,borderRadius:A.rSm,overflow:'hidden',marginBottom:12}}>
                   <div style={{display:'grid',gridTemplateColumns:'100px 1fr 80px',gap:0}}>

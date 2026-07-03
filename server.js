@@ -188,6 +188,7 @@ async function syncICSSource(source) {
     clearTimeout(timer);
   }
   const events = parseICS(text);
+  if (!events.length) return 0; // don't wipe calendar on empty/error response
   const cal = `ics:${source.name}`;
   const ins = db.prepare('INSERT INTO events (title,date,time,calendar,color,source,external_id) VALUES (?,?,?,?,?,?,?)');
   db.transaction(() => {
@@ -417,7 +418,8 @@ app.get('/api/events', requireAuth, (req, res) => {
   for (const b of billRows) {
     if (b.recurrence === 'monthly') {
       for (let m = 0; m < 3; m++) {
-        const d = new Date(today.getFullYear(), today.getMonth() + m, Math.min(b.due_day || 1, 28));
+        const daysInMo = new Date(today.getFullYear(), today.getMonth() + m + 1, 0).getDate();
+        const d = new Date(today.getFullYear(), today.getMonth() + m, Math.min(b.due_day || 1, daysInMo));
         const ds = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
         const period = `${d.getFullYear()}-${pad(d.getMonth()+1)}`;
         if (paidBillSet.has(`${b.id}_${period}`)) continue;
@@ -1337,17 +1339,23 @@ cron.schedule('0 18 * * *', async () => {
   });
 });
 
-// Event reminders — check every 15 min, push 30 min before
+// Event reminders — check every 15 min, push 30 min before (±2 min window handles late ticks)
 cron.schedule('*/15 * * * *', async () => {
-  const now   = new Date();
-  const soon  = new Date(now.getTime() + 30 * 60 * 1000);
+  const now  = new Date();
+  const soon = new Date(now.getTime() + 30 * 60 * 1000);
   const dateStr = localDate(soon);
-  const h = soon.getHours(), m = String(soon.getMinutes()).padStart(2, '0');
-  const ampm = h >= 12 ? 'PM' : 'AM';
-  const h12  = h > 12 ? h - 12 : h === 0 ? 12 : h;
-  const timeStr = `${h12}:${m} ${ampm}`;
+  const targetMin = soon.getHours() * 60 + soon.getMinutes();
 
-  const upcoming = db.prepare('SELECT * FROM events WHERE date=? AND time=?').all(dateStr, timeStr);
+  const candidates = db.prepare("SELECT * FROM events WHERE date=? AND time != 'All day' AND time != ''").all(dateStr);
+  const upcoming = candidates.filter(ev => {
+    const m = ev.time.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+    if (!m) return false;
+    let h = parseInt(m[1]);
+    const min = parseInt(m[2]);
+    if (m[3].toUpperCase() === 'PM' && h !== 12) h += 12;
+    else if (m[3].toUpperCase() === 'AM' && h === 12) h = 0;
+    return Math.abs(h * 60 + min - targetMin) <= 2;
+  });
   for (const ev of upcoming) {
     await sendPushToAll({ title: `In 30 min: ${ev.title}`, body: `${ev.time}`, tag: `event-${ev.id}` });
   }
@@ -1392,7 +1400,7 @@ app.delete('/api/countdowns/:id', requireAuth, (req, res) => {
 
 // ── Routes: Family Members ────────────────────────────────────────────────────
 app.get('/api/members/public', (req, res) => {
-  res.json(db.prepare('SELECT id, name, color, avatar FROM family_members ORDER BY created_at').all());
+  res.json(db.prepare('SELECT id, name, color FROM family_members ORDER BY created_at').all());
 });
 
 app.get('/api/members', requireAuth, (req, res) => {
@@ -1419,6 +1427,7 @@ app.delete('/api/members/:id', requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   db.prepare("DELETE FROM events WHERE member_id=? AND source='birthday'").run(id);
   db.prepare('UPDATE events SET member_id=NULL WHERE member_id=?').run(id);
+  db.prepare('UPDATE chores SET member_id=NULL WHERE member_id=?').run(id);
   db.prepare('DELETE FROM chore_completions WHERE member_id=?').run(id);
   db.prepare('DELETE FROM member_health WHERE member_id=?').run(id);
   db.prepare('DELETE FROM family_members WHERE id=?').run(id);
@@ -3295,7 +3304,7 @@ app.get('/api/vehicles/vin/:vin', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/vehicles', requireAuth, (req, res) => {
+app.post('/api/vehicles', requireAdmin, (req, res) => {
   const { name, make='', model='', year=0, color='#3B82F6', notes='', vin='' } = req.body || {};
   if (!name?.trim()) return res.status(400).json({ error: 'Name required' });
   const row = db.prepare('INSERT INTO vehicles (name,make,model,year,color,notes,vin) VALUES (?,?,?,?,?,?,?) RETURNING *')
@@ -3303,7 +3312,7 @@ app.post('/api/vehicles', requireAuth, (req, res) => {
   res.json(row);
 });
 
-app.put('/api/vehicles/:id', requireAuth, (req, res) => {
+app.put('/api/vehicles/:id', requireAdmin, (req, res) => {
   const { name, make='', model='', year=0, color='#3B82F6', notes='', vin='' } = req.body || {};
   if (!name?.trim()) return res.status(400).json({ error: 'Name required' });
   const row = db.prepare('UPDATE vehicles SET name=?,make=?,model=?,year=?,color=?,notes=?,vin=? WHERE id=? RETURNING *')
@@ -3312,14 +3321,14 @@ app.put('/api/vehicles/:id', requireAuth, (req, res) => {
   res.json(row);
 });
 
-app.delete('/api/vehicles/:id', requireAuth, (req, res) => {
+app.delete('/api/vehicles/:id', requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   db.prepare('DELETE FROM vehicle_services WHERE vehicle_id=?').run(id);
   db.prepare('DELETE FROM vehicles WHERE id=?').run(id);
   res.json({ ok: true });
 });
 
-app.post('/api/vehicles/:id/services', requireAuth, (req, res) => {
+app.post('/api/vehicles/:id/services', requireAdmin, (req, res) => {
   const { name, interval_days=0, interval_miles=0, notes='' } = req.body || {};
   if (!name?.trim()) return res.status(400).json({ error: 'Name required' });
   const row = db.prepare('INSERT INTO vehicle_services (vehicle_id,name,interval_days,interval_miles,notes) VALUES (?,?,?,?,?) RETURNING *')
@@ -3327,7 +3336,7 @@ app.post('/api/vehicles/:id/services', requireAuth, (req, res) => {
   res.json(row);
 });
 
-app.put('/api/vehicles/:id/services/:sid', requireAuth, (req, res) => {
+app.put('/api/vehicles/:id/services/:sid', requireAdmin, (req, res) => {
   const { name, interval_days=0, interval_miles=0, notes='' } = req.body || {};
   if (!name?.trim()) return res.status(400).json({ error: 'Name required' });
   const iDays = parseInt(interval_days) || 0;
@@ -3345,13 +3354,13 @@ app.put('/api/vehicles/:id/services/:sid', requireAuth, (req, res) => {
   res.json(row);
 });
 
-app.delete('/api/vehicles/:id/services/:sid', requireAuth, (req, res) => {
+app.delete('/api/vehicles/:id/services/:sid', requireAdmin, (req, res) => {
   const info = db.prepare('DELETE FROM vehicle_services WHERE id=? AND vehicle_id=?').run(Number(req.params.sid), Number(req.params.id));
   if (!info.changes) return res.status(404).json({ error: 'Not found' });
   res.json({ ok: true });
 });
 
-app.post('/api/vehicles/:id/services/:sid/done', requireAuth, (req, res) => {
+app.post('/api/vehicles/:id/services/:sid/done', requireAdmin, (req, res) => {
   const { date, miles=0 } = req.body || {};
   const doneDate = date || new Date().toISOString().slice(0, 10);
   const sid = Number(req.params.sid);
@@ -3374,14 +3383,14 @@ app.get('/api/vehicles/:id/mileage', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM vehicle_mileage WHERE vehicle_id=? ORDER BY date DESC, id DESC').all(Number(req.params.id)));
 });
 
-app.post('/api/vehicles/:id/mileage', requireAuth, (req, res) => {
+app.post('/api/vehicles/:id/mileage', requireAdmin, (req, res) => {
   const { miles, date, note='' } = req.body || {};
   if (!miles || isNaN(Number(miles))) return res.status(400).json({ error: 'miles required' });
   const r = db.prepare('INSERT INTO vehicle_mileage (vehicle_id,miles,date,note) VALUES (?,?,?,?)').run(Number(req.params.id), Number(miles), date || localDate(), note);
   res.json(db.prepare('SELECT * FROM vehicle_mileage WHERE id=?').get(r.lastInsertRowid));
 });
 
-app.delete('/api/vehicles/:id/mileage/:mid', requireAuth, (req, res) => {
+app.delete('/api/vehicles/:id/mileage/:mid', requireAdmin, (req, res) => {
   db.prepare('DELETE FROM vehicle_mileage WHERE id=? AND vehicle_id=?').run(Number(req.params.mid), Number(req.params.id));
   res.json({ ok: true });
 });
@@ -3410,14 +3419,14 @@ app.get('/api/home/appliances', requireAuth, (req, res) => {
   res.json(rows);
 });
 
-app.post('/api/home/appliances', requireAuth, (req, res) => {
+app.post('/api/home/appliances', requireAdmin, (req, res) => {
   const { name, location='', purchase_date='', warranty_date='', notes='' } = req.body || {};
   if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
   const r = db.prepare('INSERT INTO home_appliances (name,location,purchase_date,warranty_date,notes) VALUES (?,?,?,?,?)').run(name.trim(), location, purchase_date, warranty_date, notes);
   res.json(db.prepare('SELECT * FROM home_appliances WHERE id=?').get(r.lastInsertRowid));
 });
 
-app.put('/api/home/appliances/:id', requireAuth, (req, res) => {
+app.put('/api/home/appliances/:id', requireAdmin, (req, res) => {
   const a = db.prepare('SELECT * FROM home_appliances WHERE id=?').get(Number(req.params.id));
   if (!a) return res.status(404).json({ error: 'Not found' });
   const { name, location, purchase_date, warranty_date, notes } = req.body || {};
@@ -3426,7 +3435,7 @@ app.put('/api/home/appliances/:id', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM home_appliances WHERE id=?').get(a.id));
 });
 
-app.delete('/api/home/appliances/:id', requireAuth, (req, res) => {
+app.delete('/api/home/appliances/:id', requireAdmin, (req, res) => {
   db.prepare('DELETE FROM home_appliances WHERE id=?').run(Number(req.params.id));
   res.json({ ok: true });
 });
@@ -3442,7 +3451,7 @@ app.get('/api/home/consumables', requireAuth, (req, res) => {
   res.json(rows);
 });
 
-app.post('/api/home/consumables', requireAuth, (req, res) => {
+app.post('/api/home/consumables', requireAdmin, (req, res) => {
   const { name, location='', interval_days, last_replaced='', notes='' } = req.body || {};
   if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
   if (!interval_days || Number(interval_days) < 1) return res.status(400).json({ error: 'interval_days must be at least 1' });
@@ -3450,7 +3459,7 @@ app.post('/api/home/consumables', requireAuth, (req, res) => {
   res.json(computeConsumable(db.prepare('SELECT * FROM home_consumables WHERE id=?').get(r.lastInsertRowid)));
 });
 
-app.put('/api/home/consumables/:id', requireAuth, (req, res) => {
+app.put('/api/home/consumables/:id', requireAdmin, (req, res) => {
   const c = db.prepare('SELECT * FROM home_consumables WHERE id=?').get(Number(req.params.id));
   if (!c) return res.status(404).json({ error: 'Not found' });
   const { name, location, interval_days, last_replaced, notes } = req.body || {};
@@ -3461,12 +3470,12 @@ app.put('/api/home/consumables/:id', requireAuth, (req, res) => {
   res.json(computeConsumable(db.prepare('SELECT * FROM home_consumables WHERE id=?').get(c.id)));
 });
 
-app.delete('/api/home/consumables/:id', requireAuth, (req, res) => {
+app.delete('/api/home/consumables/:id', requireAdmin, (req, res) => {
   db.prepare('DELETE FROM home_consumables WHERE id=?').run(Number(req.params.id));
   res.json({ ok: true });
 });
 
-app.post('/api/home/consumables/:id/replaced', requireAuth, (req, res) => {
+app.post('/api/home/consumables/:id/replaced', requireAdmin, (req, res) => {
   const c = db.prepare('SELECT * FROM home_consumables WHERE id=?').get(Number(req.params.id));
   if (!c) return res.status(404).json({ error: 'Not found' });
   db.prepare('UPDATE home_consumables SET last_replaced=? WHERE id=?').run(localDate(), c.id);
@@ -3504,7 +3513,7 @@ app.get('/api/home/maintenance', requireAuth, (req, res) => {
   res.json(rows);
 });
 
-app.post('/api/home/maintenance', requireAuth, (req, res) => {
+app.post('/api/home/maintenance', requireAdmin, (req, res) => {
   const { name, month, notes = '' } = req.body || {};
   if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
   const m = parseInt(month);
@@ -3513,7 +3522,7 @@ app.post('/api/home/maintenance', requireAuth, (req, res) => {
   res.json(computeMaintenance(db.prepare('SELECT * FROM home_maintenance WHERE id=?').get(r.lastInsertRowid)));
 });
 
-app.put('/api/home/maintenance/:id', requireAuth, (req, res) => {
+app.put('/api/home/maintenance/:id', requireAdmin, (req, res) => {
   const item = db.prepare('SELECT * FROM home_maintenance WHERE id=?').get(Number(req.params.id));
   if (!item) return res.status(404).json({ error: 'Not found' });
   const { name, month, notes } = req.body || {};
@@ -3523,12 +3532,12 @@ app.put('/api/home/maintenance/:id', requireAuth, (req, res) => {
   res.json(computeMaintenance(db.prepare('SELECT * FROM home_maintenance WHERE id=?').get(item.id)));
 });
 
-app.delete('/api/home/maintenance/:id', requireAuth, (req, res) => {
+app.delete('/api/home/maintenance/:id', requireAdmin, (req, res) => {
   db.prepare('DELETE FROM home_maintenance WHERE id=?').run(Number(req.params.id));
   res.json({ ok: true });
 });
 
-app.post('/api/home/maintenance/:id/done', requireAuth, (req, res) => {
+app.post('/api/home/maintenance/:id/done', requireAdmin, (req, res) => {
   const item = db.prepare('SELECT * FROM home_maintenance WHERE id=?').get(Number(req.params.id));
   if (!item) return res.status(404).json({ error: 'Not found' });
   db.prepare('UPDATE home_maintenance SET last_done=? WHERE id=?').run(localDate(), item.id);
@@ -3611,14 +3620,14 @@ app.get('/api/contacts', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM contacts ORDER BY category, name').all());
 });
 
-app.post('/api/contacts', requireAuth, (req, res) => {
+app.post('/api/contacts', requireAdmin, (req, res) => {
   const { name, role='', category='Other', phone='', email='', notes='' } = req.body || {};
   if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
   const r = db.prepare('INSERT INTO contacts (name,role,category,phone,email,notes) VALUES (?,?,?,?,?,?)').run(name.trim(), role, category, phone, email, notes);
   res.json(db.prepare('SELECT * FROM contacts WHERE id=?').get(r.lastInsertRowid));
 });
 
-app.put('/api/contacts/:id', requireAuth, (req, res) => {
+app.put('/api/contacts/:id', requireAdmin, (req, res) => {
   const c = db.prepare('SELECT * FROM contacts WHERE id=?').get(Number(req.params.id));
   if (!c) return res.status(404).json({ error: 'Not found' });
   const { name, role, category, phone, email, notes } = req.body || {};
@@ -3627,7 +3636,7 @@ app.put('/api/contacts/:id', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM contacts WHERE id=?').get(c.id));
 });
 
-app.delete('/api/contacts/:id', requireAuth, (req, res) => {
+app.delete('/api/contacts/:id', requireAdmin, (req, res) => {
   db.prepare('DELETE FROM contacts WHERE id=?').run(Number(req.params.id));
   res.json({ ok: true });
 });
@@ -3643,14 +3652,14 @@ app.get('/api/budget', requireAuth, (req, res) => {
   res.json({ categories, entries });
 });
 
-app.post('/api/budget/categories', requireAuth, (req, res) => {
+app.post('/api/budget/categories', requireAdmin, (req, res) => {
   const { name, monthly_budget=0, color='#3B82F6' } = req.body || {};
   if (!name?.trim()) return res.status(400).json({ error: 'name required' });
   const r = db.prepare('INSERT INTO budget_categories (name,monthly_budget,color) VALUES (?,?,?)').run(name.trim(), Number(monthly_budget)||0, color);
   res.json(db.prepare('SELECT * FROM budget_categories WHERE id=?').get(r.lastInsertRowid));
 });
 
-app.put('/api/budget/categories/:id', requireAuth, (req, res) => {
+app.put('/api/budget/categories/:id', requireAdmin, (req, res) => {
   const c = db.prepare('SELECT * FROM budget_categories WHERE id=?').get(Number(req.params.id));
   if (!c) return res.status(404).json({ error: 'Not found' });
   const { name, monthly_budget, color } = req.body || {};
@@ -3659,13 +3668,13 @@ app.put('/api/budget/categories/:id', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM budget_categories WHERE id=?').get(c.id));
 });
 
-app.delete('/api/budget/categories/:id', requireAuth, (req, res) => {
+app.delete('/api/budget/categories/:id', requireAdmin, (req, res) => {
   db.prepare('DELETE FROM budget_entries WHERE category_id=?').run(Number(req.params.id));
   db.prepare('DELETE FROM budget_categories WHERE id=?').run(Number(req.params.id));
   res.json({ ok: true });
 });
 
-app.post('/api/budget/entries', requireAuth, (req, res) => {
+app.post('/api/budget/entries', requireAdmin, (req, res) => {
   const { category_id, amount, note='', date } = req.body || {};
   if (!category_id || !amount || isNaN(Number(amount))) return res.status(400).json({ error: 'category_id and amount required' });
   if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
@@ -3673,7 +3682,7 @@ app.post('/api/budget/entries', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM budget_entries WHERE id=?').get(r.lastInsertRowid));
 });
 
-app.delete('/api/budget/entries/:id', requireAuth, (req, res) => {
+app.delete('/api/budget/entries/:id', requireAdmin, (req, res) => {
   db.prepare('DELETE FROM budget_entries WHERE id=?').run(Number(req.params.id));
   res.json({ ok: true });
 });
@@ -3727,6 +3736,7 @@ function normalizeRows(headers, rows, format) {
   const curMonth = today.getMonth();
   const curYear = today.getFullYear();
   const out = [];
+  let skipped = 0;
   for (const row of rows) {
     if (!row.length || row.every(c => !c)) continue;
     const rawDate = dateIdx >= 0 ? row[dateIdx] : '';
@@ -3744,7 +3754,7 @@ function normalizeRows(headers, rows, format) {
       }
     }
     if (!d || isNaN(d)) continue;
-    if (d.getMonth() !== curMonth || d.getFullYear() !== curYear) continue;
+    if (d.getMonth() !== curMonth || d.getFullYear() !== curYear) { skipped++; continue; }
     const dateStr = localDate(d);
     let amt = parseFloat(rawAmt.replace(/[$,\s]/g, ''));
     if (isNaN(amt) || amt === 0) continue;
@@ -3753,7 +3763,7 @@ function normalizeRows(headers, rows, format) {
     amt = Math.abs(amt);
     out.push({ date: dateStr, note: rawDesc, amount: amt });
   }
-  return out;
+  return { rows: out, skipped };
 }
 
 app.post('/api/budget/import/preview', requireAdmin, (req, res) => {
@@ -3762,8 +3772,8 @@ app.post('/api/budget/import/preview', requireAdmin, (req, res) => {
   const { headers, rows } = parseCSV(csv);
   if (!headers.length) return res.status(400).json({ error: 'Empty CSV' });
   const detected = detectFormat(headers);
-  const normalized = normalizeRows(headers, rows, detected);
-  res.json({ headers, sample: normalized.slice(0, 5), all: normalized, detected, total: normalized.length });
+  const { rows: normalized, skipped } = normalizeRows(headers, rows, detected);
+  res.json({ headers, sample: normalized.slice(0, 5), all: normalized, detected, total: normalized.length, skipped });
 });
 
 app.post('/api/budget/import/confirm', requireAdmin, (req, res) => {
