@@ -3150,8 +3150,12 @@ app.post('/api/email/inbound', inboundRateLimit, async (req, res) => {
     }
   })();
 
-  if (pkg?.is_shipping) upsertPackage(pkg, subject || '');
-  insertBill(bill);
+  if (pkg?.is_shipping) {
+    if (DELIVERED_RE.test(subject || '')) autoDeliverPackage(pkg, subject || '');
+    else upsertPackage(pkg, subject || '');
+  }
+  if (PAID_RE.test(subject || '')) autoPayBill(bill);
+  else insertBill(bill);
 
   res.json({ ok: true });
 });
@@ -4691,6 +4695,33 @@ function insertBill(bill) {
   broadcastSSE('bills', { action: 'reload' });
   return true;
 }
+
+function autoDeliverPackage(pkg, subject) {
+  let row;
+  if (pkg?.tracking_number) row = db.prepare('SELECT id FROM packages WHERE tracking_number=? AND delivered=0').get(pkg.tracking_number);
+  if (!row) row = db.prepare('SELECT id FROM packages WHERE source_subject=? AND delivered=0').get(subject);
+  if (!row) return false;
+  db.prepare("UPDATE packages SET delivered=1, status='Delivered' WHERE id=?").run(row.id);
+  broadcastSSE('packages', { action: 'reload' });
+  return true;
+}
+
+function autoPayBill(bill) {
+  if (!bill?.payee) return false;
+  const existing = billExists(bill.payee, bill.recurrence);
+  if (!existing) return false;
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const rec = bill.recurrence || 'monthly';
+  const period = rec === 'annual' ? String(now.getFullYear())
+    : rec === 'monthly' ? `${now.getFullYear()}-${pad(now.getMonth()+1)}`
+    : bill.due_date || `${now.getFullYear()}-${pad(now.getMonth()+1)}`;
+  db.prepare('INSERT OR IGNORE INTO bill_payments (bill_id, period) VALUES (?, ?)').run(existing.id, period);
+  broadcastSSE('bills', { action: 'reload' });
+  return true;
+}
+const DELIVERED_RE = /\b(has been delivered|was delivered|delivery complete|successfully delivered|your delivery is complete|package.*delivered|item.*delivered|delivered to your)\b/i;
+const PAID_RE = /\b(payment received|payment confirmed|payment processed|payment accepted|payment successful|we received your payment|your payment.*processed|autopay.*confirmed|auto.?payment.*processed|thank you for your payment)\b/i;
 const SHIPPING_RE = /\b(ship(?:ped|ping|ment)?|track(?:ing)?|deliver(?:y|ed|ing)?|package|dispatch(?:ed)?|arrival|in transit|out for delivery)\b/i;
 const BILL_RE = /\b(bill|statement|invoice|payment due|amount due|minimum payment|your balance|autopay|auto-pay|past due|balance due)\b/i;
 const APPT_RE = /\b(appointment|reservation|itinerary|check.in|boarding pass|your flight|your hotel|your trip|your stay|rsvp|your reservation|your booking|your event)\b/i;
@@ -4715,10 +4746,12 @@ async function pollImap() {
       for await (const msg of client.fetch({ since }, { uid: true, source: true, envelope: true })) {
         if (_uidSeen(msg.uid)) continue;
         const subject = msg.envelope?.subject || '';
-        const isShipping = SHIPPING_RE.test(subject);
-        const isBill = !isShipping && BILL_RE.test(subject);
-        const isAppt = !isShipping && !isBill && APPT_RE.test(subject);
-        if (!isShipping && !isBill && !isAppt) { _uidMark(msg.uid); continue; }
+        const isDelivered = DELIVERED_RE.test(subject);
+        const isPaid = !isDelivered && PAID_RE.test(subject);
+        const isShipping = !isDelivered && SHIPPING_RE.test(subject);
+        const isBill = !isDelivered && !isPaid && !isShipping && BILL_RE.test(subject);
+        const isAppt = !isDelivered && !isPaid && !isShipping && !isBill && APPT_RE.test(subject);
+        if (!isDelivered && !isPaid && !isShipping && !isBill && !isAppt) { _uidMark(msg.uid); continue; }
         let body = '';
         try {
           const parsed = await simpleParser(msg.source);
@@ -4726,7 +4759,15 @@ async function pollImap() {
         } catch {}
         _uidMark(msg.uid); // mark before AI calls so a crash doesn't cause infinite reprocessing
 
-        if (isShipping) {
+        if (isDelivered) {
+          const pkg = await callAiForPackage(subject, body).catch(() => null);
+          const resolved = pkg?.is_shipping ? autoDeliverPackage(pkg, subject) : false;
+          console.log(`[imap] delivery confirmation: ${resolved ? 'marked delivered' : 'no matching package found'}`);
+        } else if (isPaid) {
+          const bill = await callAiForBill(subject, body).catch(() => null);
+          const resolved = autoPayBill(bill);
+          console.log(`[imap] payment confirmation: ${resolved ? `marked paid — ${bill?.payee}` : 'no matching bill found'}`);
+        } else if (isShipping) {
           const [pkg, result] = await Promise.all([
             callAiForPackage(subject, body).catch(e => { console.error('[imap] pkg AI error:', e?.message); return null; }),
             callAiForEvent(subject, body).catch(() => null),
@@ -4812,21 +4853,29 @@ async function scanImap30Days() {
       for await (const msg of client.fetch({ since }, { uid: true, source: true, envelope: true })) {
         if (_uidSeen(msg.uid)) continue;
         const subject = msg.envelope?.subject || '';
-        const isShipping = SHIPPING_RE.test(subject);
-        const isBill = !isShipping && BILL_RE.test(subject);
-        const isAppt = !isShipping && !isBill && APPT_RE.test(subject);
-        if (!isShipping && !isBill && !isAppt) { _uidMark(msg.uid); continue; }
+        const isDelivered = DELIVERED_RE.test(subject);
+        const isPaid = !isDelivered && PAID_RE.test(subject);
+        const isShipping = !isDelivered && SHIPPING_RE.test(subject);
+        const isBill = !isDelivered && !isPaid && !isShipping && BILL_RE.test(subject);
+        const isAppt = !isDelivered && !isPaid && !isShipping && !isBill && APPT_RE.test(subject);
+        if (!isDelivered && !isPaid && !isShipping && !isBill && !isAppt) { _uidMark(msg.uid); continue; }
         let body = '';
         try { const p = await simpleParser(msg.source); body = p.text || (p.html ? stripHtml(p.html) : ''); } catch {}
         _uidMark(msg.uid);
-        batch.push({ subject, isShipping, isBill, isAppt, body });
+        batch.push({ subject, isDelivered, isPaid, isShipping, isBill, isAppt, body });
         if (batch.length >= 50) break;
       }
     } finally { lock.release(); }
     try { await client.logout(); } catch {}
 
-    for (const { subject, isShipping, isBill, isAppt, body } of batch) {
-      if (isShipping) {
+    for (const { subject, isDelivered, isPaid, isShipping, isBill, isAppt, body } of batch) {
+      if (isDelivered) {
+        const pkg = await callAiForPackage(subject, body).catch(() => null);
+        if (pkg?.is_shipping && autoDeliverPackage(pkg, subject)) summary.packages++;
+      } else if (isPaid) {
+        const bill = await callAiForBill(subject, body).catch(() => null);
+        if (autoPayBill(bill)) summary.bills++;
+      } else if (isShipping) {
         const [pkg, evt] = await Promise.all([
           callAiForPackage(subject, body).catch(() => null),
           callAiForEvent(subject, body).catch(() => null),
