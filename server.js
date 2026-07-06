@@ -67,14 +67,16 @@ function safeCompare(a, b) {
   return timingSafeEqual(ha, hb);
 }
 
-// Rate limiter for PIN-based auth endpoints (10 attempts/ip/min)
+// Rate limiter for PIN-based auth endpoints (10 attempts/ip/min, sliding window)
 const _authAttempts = new Map();
-setInterval(() => _authAttempts.clear(), 60_000);
 function authRateLimit(req, res, next) {
   const ip = req.ip || 'unknown';
-  const n = (_authAttempts.get(ip) || 0) + 1;
-  _authAttempts.set(ip, n);
-  if (n > 10) return res.status(429).json({ error: 'Too many attempts' });
+  const now = Date.now();
+  const window = 60_000;
+  const timestamps = (_authAttempts.get(ip) || []).filter(t => now - t < window);
+  timestamps.push(now);
+  _authAttempts.set(ip, timestamps);
+  if (timestamps.length > 10) return res.status(429).json({ error: 'Too many attempts' });
   next();
 }
 
@@ -227,7 +229,7 @@ function computeNextDue(recurrence, fromDate) {
   // Use fromDate (chore's current next_due) as base so missed chores
   // advance from their scheduled date rather than from now.
   const base = fromDate ? new Date(fromDate + 'T00:00:00') : new Date();
-  const d = new Date(Math.max(base.getTime(), new Date().setHours(0,0,0,0)));
+  const d = new Date(base.getTime());
   if (recurrence.startsWith('Daily'))       d.setDate(d.getDate() + 1);
   else if (recurrence.startsWith('Bi-w'))   d.setDate(d.getDate() + 14);
   else if (recurrence.startsWith('Month'))  addMonths(d);
@@ -344,12 +346,14 @@ app.get('/api/auth/setup-status', (req, res) => {
 });
 
 const _setupAttempts = new Map();
-setInterval(() => _setupAttempts.clear(), 60_000);
 app.post('/api/auth/setup', async (req, res) => {
   const ip = req.ip || 'unknown';
-  const attempts = (_setupAttempts.get(ip) || 0) + 1;
-  _setupAttempts.set(ip, attempts);
-  if (attempts > 5) return res.status(429).json({ error: 'Too many attempts' });
+  const now = Date.now();
+  const window = 60_000;
+  const timestamps = (_setupAttempts.get(ip) || []).filter(t => now - t < window);
+  timestamps.push(now);
+  _setupAttempts.set(ip, timestamps);
+  if (timestamps.length > 5) return res.status(429).json({ error: 'Too many attempts' });
   const existing = db.prepare('SELECT value FROM settings WHERE key=?').get('admin_pin_hash')?.value;
   if (existing) return res.status(403).json({ error: 'Admin already configured' });
   const { pin } = req.body;
@@ -457,8 +461,8 @@ app.post('/api/events', requireAuth, (req, res) => {
   const calColors = { personal:'#007AFF', work:'#5856D6', family:'#32ADE6', kith:'#34C759' };
   const col = color || calColors[calendar] || '#34C759';
   const r = db.prepare(
-    'INSERT INTO events (title,date,time,end_time,duration,calendar,color,notes,member_id,recurring_rule) VALUES (?,?,?,?,?,?,?,?,?,?)'
-  ).run(title.trim(), date, normalizeTime(time)||'All day', end_time||'', duration||'1h', calendar||'kith', col, notes||'', member_id||null, recurring_rule||'');
+    'INSERT INTO events (title,date,time,end_time,duration,calendar,color,notes,member_id,recurring_rule,ics_uid) VALUES (?,?,?,?,?,?,?,?,?,?,?)'
+  ).run(title.trim(), date, normalizeTime(time)||'All day', end_time||'', duration||'1h', calendar||'kith', col, notes||'', member_id||null, recurring_rule||'', require('crypto').randomUUID());
   const seriesId = r.lastInsertRowid;
 
   // Generate recurring occurrences
@@ -630,14 +634,14 @@ app.put('/api/chores/:id/done', requireAuth, (req, res) => {
   res.json({ done: storedDone, completed: done === 1, next_due: nextDue, status: newStatus, points_earned: done ? (c.points || 1) : 0, streak: newStreak });
 });
 
-app.post('/api/chores/:id/photo', requireAuth, (req, res) => {
+app.post('/api/chores/:id/photo', requireAuth, async (req, res) => {
   const id = Number(req.params.id);
   const { data, filename = 'photo.jpg' } = req.body || {};
   if (!data?.startsWith('data:image/')) return res.status(400).json({ error: 'image data required' });
   const ext = (filename.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z]/g, '') || 'jpg';
   const safe = `chore-${Date.now()}.${ext}`;
   try {
-    fs.writeFileSync(path.join(PHOTOS_DIR, safe), Buffer.from(data.split(',')[1], 'base64'));
+    await fs.promises.writeFile(path.join(PHOTOS_DIR, safe), Buffer.from(data.split(',')[1], 'base64'));
     const memberId = req.user.sub === 'admin' ? null : Number(req.user.sub);
     const completion = memberId
       ? db.prepare("SELECT id FROM chore_completions WHERE chore_id=? AND member_id=? ORDER BY completed_at DESC LIMIT 1").get(id, memberId)
@@ -979,7 +983,7 @@ app.get('/api/ics/export', (req, res) => {
     cal.push(fmtDtEnd(ev.date, ev.time, ev.end_time, ev.duration));
     cal.push(`SUMMARY:${esc(ev.title)}`);
     if (ev.notes) cal.push(`DESCRIPTION:${esc(ev.notes)}`);
-    cal.push(`UID:${ev.id}@kith`);
+    cal.push(`UID:${ev.ics_uid || ev.id + '@kith'}`);
     cal.push(`DTSTAMP:${stamp}`);
     cal.push('END:VEVENT');
   }
@@ -1615,12 +1619,14 @@ app.get('/api/events/stream', (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
   _sseClients.add(res);
+  const cleanup = () => { clearInterval(hb); _sseClients.delete(res); };
   // Heartbeat every 25s — cleans up on failed write (handles abrupt disconnects)
   const hb = setInterval(() => {
     try { res.write(':ping\n\n'); }
-    catch { clearInterval(hb); _sseClients.delete(res); }
+    catch { cleanup(); }
   }, 25000);
-  req.on('close', () => { clearInterval(hb); _sseClients.delete(res); });
+  req.on('close', cleanup);
+  res.socket?.on('error', cleanup);
 });
 
 // ── Routes: Home Assistant webhook ───────────────────────────────────────────
@@ -1952,7 +1958,13 @@ app.post('/api/quick-actions/trigger', requireAdmin, async (req, res) => {
   if (!/^https?:\/\//i.test(action.url)) return res.status(400).json({ error: 'Action URL must use http(s)' });
   try { new URL(action.url); } catch { return res.status(400).json({ error: 'Invalid action URL' }); }
   const _u = new URL(action.url);
-  if (/^(localhost|127\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.|0\.0\.0\.0|::1|::ffff:|fd[0-9a-f]{2}:|0x[0-9a-f]+$|0[0-7]+\.|[0-9]{8,10}$)/i.test(_u.hostname)) {
+  const _h = _u.hostname.toLowerCase();
+  const _isPrivate =
+    /^(localhost|127\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.|0\.0\.0\.0|::1$|::ffff:|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:)/.test(_h) ||
+    /^0x[0-9a-f]+$/i.test(_h) ||   // hex encoded
+    /^0[0-7]+\./.test(_h) ||        // octal encoded
+    /^\d{8,10}$/.test(_h);          // decimal encoded IPv4
+  if (_isPrivate) {
     return res.status(400).json({ error: 'Action URL must not target private/loopback addresses' });
   }
   try {
@@ -2919,13 +2931,13 @@ app.get('/api/photos', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM photos ORDER BY created_at DESC').all());
 });
 
-app.post('/api/photos', requireAuth, (req, res) => {
+app.post('/api/photos', requireAuth, async (req, res) => {
   const { filename, data } = req.body;
   if (!filename || !data?.startsWith('data:image/')) return res.status(400).json({ error: 'filename and image data required' });
   const ext = (filename.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z]/g, '') || 'jpg';
   const safe = `${Date.now()}.${ext}`;
   try {
-    fs.writeFileSync(path.join(PHOTOS_DIR, safe), Buffer.from(data.split(',')[1], 'base64'));
+    await fs.promises.writeFile(path.join(PHOTOS_DIR, safe), Buffer.from(data.split(',')[1], 'base64'));
     const r = db.prepare('INSERT INTO photos (filename) VALUES (?)').run(safe);
     res.json({ id: r.lastInsertRowid, filename: safe });
   } catch (e) {
@@ -3013,16 +3025,18 @@ async function callAiForEvent(subject, body) {
 async function callAiWithMedia(imageBase64, mimeType) {
   const getSetting = k => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value || '';
   const provider = getSetting('ai_provider') || 'anthropic';
-  const apiKey = getSetting('ai_api_key') || getSetting('anthropic_api_key') || process.env.ANTHROPIC_API_KEY || '';
+  const apiKey = getSetting('ai_api_key') || process.env.ANTHROPIC_API_KEY || '';
   if (!apiKey) return [];
   const prompt = 'Extract all calendar events from this image or document. Return JSON only, no other text.\nReturn: {"events":[{"event_name":"...","event_date":"YYYY-MM-DD or natural language","event_time":"H:MM AM/PM or All day","recurrence":"One-time|Weekly|Monthly|etc","confidence":"high|medium|low"}]}\nReturn {"events":[]} if no events found.';
   try {
     let text;
+    const aiTimeout = AbortSignal.timeout(15000);
     if (provider === 'gemini') {
       const data = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contents: [{ parts: [{ inlineData: { mimeType, data: imageBase64 } }, { text: prompt }] }], generationConfig: { responseMimeType: 'application/json' } }),
+        signal: aiTimeout,
       }).then(r => r.json());
       text = data.candidates?.[0]?.content?.parts?.[0]?.text;
     } else if (provider === 'anthropic') {
@@ -3030,6 +3044,7 @@ async function callAiWithMedia(imageBase64, mimeType) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 800, messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: mimeType, data: imageBase64 } }, { type: 'text', text: prompt }] }] }),
+        signal: aiTimeout,
       }).then(r => r.json());
       text = data.content?.[0]?.text;
     } else if (provider === 'openai' || provider === 'groq') {
@@ -3040,6 +3055,7 @@ async function callAiWithMedia(imageBase64, mimeType) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({ model, max_tokens: 800, messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } }, { type: 'text', text: prompt }] }] }),
+        signal: aiTimeout,
       }).then(r => r.json());
       text = data.choices?.[0]?.message?.content;
     } else {
@@ -3055,31 +3071,35 @@ async function callAiWithMedia(imageBase64, mimeType) {
 async function callAi(systemPrompt, userContent) {
   const getSetting = k => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value || '';
   const provider = getSetting('ai_provider') || 'anthropic';
-  const apiKey = getSetting('ai_api_key') || getSetting('anthropic_api_key') || process.env.ANTHROPIC_API_KEY || '';
+  const apiKey = getSetting('ai_api_key') || process.env.ANTHROPIC_API_KEY || '';
   if (!apiKey) { console.warn('[ai] no API key configured'); return null; }
   try {
     let text;
+    const aiTimeout = AbortSignal.timeout(15000);
     if (provider === 'gemini') {
       const data = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contents: [{ parts: [{ text: systemPrompt + '\n\n' + userContent }] }], generationConfig: { responseMimeType: 'application/json' } }),
+        signal: aiTimeout,
       }).then(r => r.json());
       text = data.candidates?.[0]?.content?.parts?.[0]?.text;
     } else if (provider === 'openai' || provider === 'groq' || provider === 'deepseek') {
       const baseUrl = provider === 'groq' ? 'https://api.groq.com/openai/v1' : provider === 'deepseek' ? 'https://api.deepseek.com/v1' : 'https://api.openai.com/v1';
-      const model = provider === 'groq' ? 'llama-3.3-70b-versatile' : provider === 'deepseek' ? 'deepseek-chat' : 'gpt-4o-mini';
+      const model = provider === 'groq' ? 'llama-3.3-70b-versatile' : provider === 'deepseek' ? 'deepseek-v4-pro' : 'gpt-4o-mini';
       const supportsJsonMode = provider === 'openai' || provider === 'deepseek';
       const reqBody = { model, max_tokens: 400, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userContent }] };
       if (supportsJsonMode) reqBody.response_format = { type: 'json_object' };
       const data = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify(reqBody),
+        signal: aiTimeout,
       }).then(r => r.json());
       text = data.choices?.[0]?.message?.content;
     } else {
       const data = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 400, system: systemPrompt, messages: [{ role: 'user', content: userContent }] }),
+        signal: aiTimeout,
       }).then(r => r.json());
       text = data.content?.[0]?.text;
     }
@@ -3243,8 +3263,8 @@ app.delete('/api/recipes/:id', requireAuth, (req, res) => {
 app.get('/api/bills', requireAuth, (req, res) => {
   const bills = db.prepare('SELECT * FROM bills WHERE active=1 ORDER BY category, due_day, name').all();
   const now = new Date();
-  const yearStr = String(now.getFullYear());
-  const payments = db.prepare("SELECT * FROM bill_payments WHERE period LIKE ?").all(`${yearStr}%`);
+  const cutoff = new Date(now.getFullYear(), now.getMonth() - 13, 1).toISOString().slice(0, 7);
+  const payments = db.prepare("SELECT * FROM bill_payments WHERE period >= ?").all(cutoff);
   res.json({ bills, payments });
 });
 
@@ -3911,6 +3931,16 @@ app.get('/api/email/unsubscribe', (req, res) => {
   if (!stored || req.query.t !== stored) {
     return res.status(400).send('<html><body style="font-family:sans-serif;padding:40px;text-align:center"><h2>Invalid link</h2><p>This unsubscribe link is not valid.</p></body></html>');
   }
+  // Confirmation page — actual unsubscribe requires a POST to prevent link-scanner auto-trigger
+  res.send(`<html><body style="font-family:-apple-system,sans-serif;padding:48px 24px;text-align:center;background:#f5f5f7"><div style="max-width:400px;margin:0 auto;background:#fff;border-radius:16px;padding:36px;box-shadow:0 2px 12px rgba(0,0,0,.08)"><h2 style="margin:0 0 12px;font-size:22px">Unsubscribe from Kith emails?</h2><p style="color:#666;margin:0 0 24px">You will no longer receive daily or weekly email reminders.</p><form method="POST" action="/api/email/unsubscribe"><input type="hidden" name="t" value="${req.query.t}"><button type="submit" style="background:#FF3B30;color:#fff;border:none;padding:12px 28px;border-radius:10px;font-size:15px;cursor:pointer">Yes, unsubscribe</button></form><p style="color:#999;font-size:13px;margin-top:16px">You can re-enable in Settings → Email Reminders.</p></div></body></html>`);
+});
+
+app.post('/api/email/unsubscribe', (req, res) => {
+  const stored = db.prepare("SELECT value FROM settings WHERE key='email_unsubscribe_token'").get()?.value;
+  const t = req.body?.t || req.query.t;
+  if (!stored || t !== stored) {
+    return res.status(400).send('<html><body style="font-family:sans-serif;padding:40px;text-align:center"><h2>Invalid link</h2><p>This unsubscribe link is not valid.</p></body></html>');
+  }
   const upd = db.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)');
   upd.run('daily_summary_enabled', '0');
   upd.run('weekly_digest_enabled', '0');
@@ -4027,10 +4057,13 @@ app.get('/api/emergency', requireAuth, (req, res) => {
   for (const r of rows) out[r.key] = r.value || '';
   res.json(out);
 });
+const EMERGENCY_KEYS = new Set(['gas_shutoff','water_shutoff','electric_shutoff','insurance_company','policy_number','insurance_phone','doctor_name','doctor_phone','medical_notes','extra_notes']);
 app.put('/api/emergency', requireAdmin, (req, res) => {
   const body = req.body || {};
   const ins = db.prepare('INSERT INTO emergency_info (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
-  for (const [k, v] of Object.entries(body)) ins.run(String(k), String(v ?? ''));
+  for (const [k, v] of Object.entries(body)) {
+    if (EMERGENCY_KEYS.has(k)) ins.run(k, String(v ?? ''));
+  }
   const rows = db.prepare('SELECT key,value FROM emergency_info').all();
   const out = {};
   for (const r of rows) out[r.key] = r.value || '';

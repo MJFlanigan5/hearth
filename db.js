@@ -498,6 +498,14 @@ if (!_wiz) {
 // Sprint 9 migrations
 try { db.prepare("ALTER TABLE chore_completions ADD COLUMN photo_filename TEXT").run(); } catch(e) {}
 try { db.prepare("ALTER TABLE family_members ADD COLUMN family_role TEXT DEFAULT 'adult'").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE events ADD COLUMN ics_uid TEXT").run(); } catch(e) {}
+// Backfill ics_uid for existing events using their row id (one-time, stable after this point)
+try {
+  const { randomUUID } = require('crypto');
+  const nullRows = db.prepare("SELECT id FROM events WHERE ics_uid IS NULL").all();
+  const upd = db.prepare("UPDATE events SET ics_uid=? WHERE id=?");
+  for (const r of nullRows) upd.run(randomUUID(), r.id);
+} catch(e) {}
 
 // Indexes for common query patterns
 try { db.exec(`
