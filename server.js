@@ -282,7 +282,7 @@ app.get('/api/weather/geocode', requireAuth, async (req, res) => {
   if (!city) return res.status(400).json({ error: 'city required' });
   try {
     const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=en&format=json`;
-    const data = await fetch(url).then(r => r.json());
+    const data = await fetch(url, { signal: AbortSignal.timeout(8000) }).then(r => r.json());
     const r = (data.results || [])[0];
     if (!r) return res.status(404).json({ error: 'City not found' });
     res.json({
@@ -309,7 +309,7 @@ app.get('/api/weather', requireAuth, async (req, res) => {
       `&current=temperature_2m,weather_code` +
       `&daily=weather_code,temperature_2m_max,temperature_2m_min` +
       `&temperature_unit=${omUnit}&timezone=auto&forecast_days=5`;
-    const data = await fetch(url).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+    const data = await fetch(url, { signal: AbortSignal.timeout(8000) }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
     const [icon, condition] = wmoInfo(data.current.weather_code);
     const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
     const todayISO = localDate();
@@ -1210,7 +1210,7 @@ app.get('/api/sports', requireAuth, async (req, res) => {
       results.push(..._sportsCache[league]); return;
     }
     try {
-      const data = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${espnPath}/scoreboard`).then(r => r.json());
+      const data = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${espnPath}/scoreboard`, { signal: AbortSignal.timeout(8000) }).then(r => r.json());
       const games = (data.events || []).map(ev => {
         const comp = ev.competitions[0];
         const home = comp.competitors.find(c => c.homeAway === 'home');
@@ -1263,7 +1263,7 @@ app.get('/api/news', requireAuth, async (req, res) => {
   try {
     const results = await Promise.all(feedUrls.map(async url => {
       try {
-        const xml = await fetch(url, { headers: { 'User-Agent': 'Kith/1.0' } }).then(r => r.text());
+        const xml = await fetch(url, { headers: { 'User-Agent': 'Kith/1.0' }, signal: AbortSignal.timeout(8000) }).then(r => r.text());
         return parseRSS(xml);
       } catch { return []; }
     }));
