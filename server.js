@@ -2779,16 +2779,15 @@ app.get('/api/widgets/data', requireAuth, async (req, res) => {
     const dayOfYear = Math.floor((Date.now() - new Date(new Date().getFullYear(),0,0)) / 86400000);
     const word = words[dayOfYear % words.length];
     const r = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${word}`, { signal: AbortSignal.timeout(6000) });
-    if (!r.ok) return { word, partOfSpeech: '', definition: '', phonetic: '', audio: '' };
+    if (!r.ok) return null;
     const d = await r.json();
     const entry = d[0];
     const meaning = entry?.meanings?.[0];
     const def = meaning?.definitions?.[0];
-    if (!entry?.word || !def?.definition) return { word, partOfSpeech: '', definition: '', phonetic: '', audio: '' };
+    if (!entry?.word || !def?.definition) return null;
     const phonetics = entry.phonetics || [];
     const phonetic = entry.phonetic || phonetics.find(p => p.text)?.text || '';
-    const audio = phonetics.find(p => p.audio)?.audio || '';
-    return { word: entry.word, partOfSpeech: meaning.partOfSpeech || '', definition: def.definition, example: def.example || '', phonetic, audio };
+    return { word: entry.word, partOfSpeech: meaning.partOfSpeech || '', definition: def.definition, example: def.example || '', phonetic };
   }).then(d => { if (d) result.wotd = d; }));
 
   // Sunrise / sunset + moon phase — sunrisesunset.io (free, no key)
