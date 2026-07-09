@@ -23,6 +23,9 @@ function broadcastSSE(event, data) {
   }
 }
 
+// Static token for media proxy endpoints (img tags can't send auth headers)
+const MEDIA_TOKEN = require('crypto').randomBytes(32).toString('hex');
+
 const PHOTOS_DIR = path.join(process.env.DATA_DIR || path.join(__dirname, 'data'), 'photos');
 fs.mkdirSync(PHOTOS_DIR, { recursive: true });
 app.use('/photos', express.static(PHOTOS_DIR));
@@ -2298,7 +2301,7 @@ app.get('/api/widgets/data', requireAuth, async (req, res) => {
 
   const plexUrl = gs('plex_url');
   const plexToken = gs('plex_token');
-  const _plexThumb = p => p ? `/api/plex/thumb?path=${encodeURIComponent(p)}` : null;
+  const _plexThumb = p => p ? `/api/plex/thumb?path=${encodeURIComponent(p)}&mt=${MEDIA_TOKEN}` : null;
   if (plexUrl && plexToken)
     p.push(_wFetch('plex', 30000, async () => {
       const base = plexUrl.replace(/\/$/, '');
@@ -2847,7 +2850,8 @@ app.get('/api/widgets/debug', requireAdmin, (req, res) => {
 // ── Routes: Music (Last.fm now-playing) ──────────────────────────────────────
 let _lastfmCache = null; let _lastfmCacheAt = 0;
 
-app.get('/api/plex/thumb', requireAuth, async (req, res) => {
+app.get('/api/plex/thumb', async (req, res) => {
+  if (!safeCompare(req.query.mt || '', MEDIA_TOKEN)) return res.status(401).end();
   const plexUrl = gs('plex_url');
   const plexToken = gs('plex_token');
   if (!plexUrl || !plexToken) return res.status(404).end();
