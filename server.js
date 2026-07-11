@@ -204,9 +204,34 @@ async function syncICSSource(source) {
   return events.length;
 }
 
-// ── Local date helper (avoids UTC-vs-local timezone flip) ─────────────────────
+// ── Timezone (configurable in Settings, falls back to container TZ) ───────────
+function getTimezone() {
+  return db.prepare("SELECT value FROM settings WHERE key='timezone'").get()?.value || process.env.TZ || 'America/New_York';
+}
+
+// ── Local date helper (formats in the household's configured timezone,
+// regardless of what timezone the host/container is actually running in) ──────
+const _dateFmtCache = new Map();
 function localDate(d = new Date()) {
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const tz = getTimezone();
+  let fmt = _dateFmtCache.get(tz);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+    _dateFmtCache.set(tz, fmt);
+  }
+  return fmt.format(d); // en-CA gives YYYY-MM-DD directly
+}
+
+// Hour/minute and weekday of an instant, in the household's configured timezone
+// (use instead of Date#getHours/getMinutes/getDay when comparing "now" against
+// a user-facing schedule like a reminder time or day-of-week meal lookup).
+function localHM(d = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: getTimezone(), hour12: false, hour: '2-digit', minute: '2-digit' }).formatToParts(d);
+  const get = t => parts.find(p => p.type === t)?.value;
+  return { hour: Number(get('hour')), minute: Number(get('minute')) };
+}
+function localWeekday(d = new Date(), style = 'long') {
+  return new Intl.DateTimeFormat('en-US', { timeZone: getTimezone(), weekday: style }).format(d);
 }
 
 // ── Chore status helper ───────────────────────────────────────────────────────
@@ -612,7 +637,7 @@ app.put('/api/chores/:id/done', requireAuth, (req, res) => {
   // so the chore shows as upcoming with the new date. For one-time: toggle done.
   const done = isRecurring ? 1 : (c.done ? 0 : 1);
   const todayISO = localDate();
-  const todayDisplay = new Date().toLocaleDateString('en-US', { month:'short', day:'numeric' });
+  const todayDisplay = new Date().toLocaleDateString('en-US', { month:'short', day:'numeric', timeZone: getTimezone() });
   const nextDue = done ? computeNextDue(c.recurrence, c.next_due) : todayISO;
   const lastDone = done ? todayDisplay : c.last_done;
   const newStreak = done ? (c.streak || 0) + 1 : Math.max(0, (c.streak || 0) - 1);
@@ -1283,7 +1308,7 @@ app.get('/api/news', requireAuth, async (req, res) => {
 // ── Cron jobs ─────────────────────────────────────────────────────────────────
 
 // Update chore statuses at midnight
-cron.schedule('0 0 * * *', updateChoreStatuses);
+cron.schedule('0 0 * * *', updateChoreStatuses, { timezone: getTimezone() });
 
 // Push chore reminders at 8am
 cron.schedule('0 8 * * *', async () => {
@@ -1295,7 +1320,7 @@ cron.schedule('0 8 * * *', async () => {
     body: `${due.length} chore${due.length > 1 ? 's' : ''} need attention: ${due.map(c => c.name).join(', ')}`,
     tag: 'chores',
   });
-});
+}, { timezone: getTimezone() });
 
 // Home care reminders at 9am — consumables, maintenance, pets, vehicles
 async function sendHomeReminders() {
@@ -1327,7 +1352,7 @@ async function sendHomeReminders() {
     tag: 'home-reminders',
   });
 }
-cron.schedule('0 9 * * *', sendHomeReminders);
+cron.schedule('0 9 * * *', sendHomeReminders, { timezone: getTimezone() });
 
 app.post('/api/reminders/test', requireAdmin, async (req, res) => {
   await sendHomeReminders();
@@ -1344,14 +1369,15 @@ cron.schedule('0 18 * * *', async () => {
     body: `${due.length} chore${due.length > 1 ? 's' : ''} still need attention: ${due.map(c => c.name).join(', ')}`,
     tag: 'chores-pm',
   });
-});
+}, { timezone: getTimezone() });
 
 // Event reminders — check every 15 min, push 30 min before (±2 min window handles late ticks)
 cron.schedule('*/15 * * * *', async () => {
   const now  = new Date();
   const soon = new Date(now.getTime() + 30 * 60 * 1000);
   const dateStr = localDate(soon);
-  const targetMin = soon.getHours() * 60 + soon.getMinutes();
+  const { hour: soonHour, minute: soonMin } = localHM(soon);
+  const targetMin = soonHour * 60 + soonMin;
 
   const candidates = db.prepare("SELECT * FROM events WHERE date=? AND time != 'All day' AND time != ''").all(dateStr);
   const upcoming = candidates.filter(ev => {
@@ -1366,7 +1392,7 @@ cron.schedule('*/15 * * * *', async () => {
   for (const ev of upcoming) {
     await sendPushToAll({ title: `In 30 min: ${ev.title}`, body: `${ev.time}`, tag: `event-${ev.id}` });
   }
-});
+}, { timezone: getTimezone() });
 
 // ICS sync every 6 hours
 cron.schedule('0 */6 * * *', async () => {
@@ -1374,7 +1400,7 @@ cron.schedule('0 */6 * * *', async () => {
   for (const src of sources) {
     try { await syncICSSource(src); } catch (e) { /* skip */ }
   }
-});
+}, { timezone: getTimezone() });
 
 // ── Routes: Countdowns ───────────────────────────────────────────────────────
 app.get('/api/countdowns', requireAuth, (req, res) => {
@@ -3369,7 +3395,7 @@ app.put('/api/vehicles/:id/services/:sid', requireAdmin, (req, res) => {
   if (iDays > 0 && existing.last_done_date) {
     const d = new Date(existing.last_done_date + 'T00:00:00');
     d.setDate(d.getDate() + iDays);
-    nextDue = d.toISOString().slice(0, 10);
+    nextDue = localDate(d);
   }
   const row = db.prepare('UPDATE vehicle_services SET name=?,interval_days=?,interval_miles=?,notes=?,next_due_date=? WHERE id=? AND vehicle_id=? RETURNING *')
     .get(name.trim(), iDays, parseInt(interval_miles)||0, notes, nextDue, Number(req.params.sid), Number(req.params.id));
@@ -3385,7 +3411,7 @@ app.delete('/api/vehicles/:id/services/:sid', requireAdmin, (req, res) => {
 
 app.post('/api/vehicles/:id/services/:sid/done', requireAdmin, (req, res) => {
   const { date, miles=0 } = req.body || {};
-  const doneDate = date || new Date().toISOString().slice(0, 10);
+  const doneDate = date || localDate();
   const sid = Number(req.params.sid);
   const vid = Number(req.params.id);
   const svc = db.prepare('SELECT * FROM vehicle_services WHERE id=? AND vehicle_id=?').get(sid, vid);
@@ -3394,7 +3420,7 @@ app.post('/api/vehicles/:id/services/:sid/done', requireAdmin, (req, res) => {
   if (svc.interval_days > 0) {
     const d = new Date(doneDate + 'T00:00:00');
     d.setDate(d.getDate() + svc.interval_days);
-    nextDue = d.toISOString().slice(0, 10);
+    nextDue = localDate(d);
   }
   const row = db.prepare('UPDATE vehicle_services SET last_done_date=?,last_done_miles=?,next_due_date=? WHERE id=? RETURNING *')
     .get(doneDate, parseInt(miles)||0, nextDue, sid);
@@ -3422,8 +3448,12 @@ app.delete('/api/vehicles/:id/mileage/:mid', requireAdmin, (req, res) => {
 
 function homeDaysUntil(dateStr) {
   if (!dateStr) return null;
-  const t = new Date(); t.setHours(0,0,0,0);
-  return Math.round((new Date(dateStr + 'T00:00:00') - t) / 86400000);
+  // Diff two calendar dates via UTC-anchored midnights so the result is a pure
+  // day count, unaffected by DST and independent of the process's own timezone —
+  // "today" is taken from localDate(), which respects the configured Settings timezone.
+  const today = new Date(localDate() + 'T00:00:00Z');
+  const target = new Date(dateStr + 'T00:00:00Z');
+  return Math.round((target - today) / 86400000);
 }
 
 function computeConsumable(item) {
@@ -3508,9 +3538,9 @@ app.post('/api/home/consumables/:id/replaced', requireAdmin, (req, res) => {
 // ── Home: Maintenance ─────────────────────────────────────────────────────────
 
 function computeMaintenance(item) {
-  const today = new Date();
-  const thisYear = today.getFullYear();
-  const thisMonth = today.getMonth() + 1;
+  const todayStr = localDate();
+  const thisYear = Number(todayStr.slice(0, 4));
+  const thisMonth = Number(todayStr.slice(5, 7));
   const doneThisYear = item.last_done && item.last_done.startsWith(String(thisYear));
   let status, nextDue;
   if (doneThisYear) {
@@ -3958,20 +3988,21 @@ cron.schedule('* * * * *', async () => {
 
   const configTime = g('daily_summary_time') || '07:00';
   const now = new Date();
-  const nowHHMM = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  const { hour: nowHour, minute: nowMin } = localHM(now);
+  const nowHHMM = `${String(nowHour).padStart(2,'0')}:${String(nowMin).padStart(2,'0')}`;
   const today = localDate(now);
   if (nowHHMM !== configTime || _dailySummarySentDate === today) return;
   _dailySummarySentDate = today;
 
   const events = db.prepare("SELECT * FROM events WHERE date=? ORDER BY time").all(today);
   const chores = db.prepare("SELECT * FROM chores WHERE status IN ('due','overdue') AND done=0").all();
-  const dayAbbr = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][now.getDay()];
+  const dayAbbr = localWeekday(now, 'short');
   const meal   = db.prepare("SELECT meal FROM meals WHERE day=?").get(dayAbbr)?.meal || '';
 
   if (!events.length && !chores.length && !meal) return;
 
-  const dow = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][now.getDay()];
-  const dateLabel = now.toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
+  const dow = localWeekday(now, 'long');
+  const dateLabel = now.toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric', timeZone: getTimezone() });
 
   let html = '', text = `Kith — ${dow}, ${dateLabel}\n\n`;
 
@@ -4007,7 +4038,7 @@ cron.schedule('* * * * *', async () => {
   } catch (e) {
     console.error('[email] daily summary failed:', e.message);
   }
-});
+}, { timezone: getTimezone() });
 
 // Weekly digest — Sunday at 6pm (only if there's something to report)
 cron.schedule('0 18 * * 0', async () => {
@@ -4016,7 +4047,7 @@ cron.schedule('0 18 * * 0', async () => {
 
   const days = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(); d.setDate(d.getDate() + i);
-    return { iso: localDate(d), label: d.toLocaleDateString('en-US', { weekday:'long', month:'short', day:'numeric' }) };
+    return { iso: localDate(d), label: d.toLocaleDateString('en-US', { weekday:'long', month:'short', day:'numeric', timeZone: getTimezone() }) };
   });
 
   let html = '', text = 'YOUR WEEK AHEAD\n\n';
@@ -4051,7 +4082,7 @@ cron.schedule('0 18 * * 0', async () => {
   } catch (e) {
     console.error('[email] weekly digest failed:', e.message);
   }
-});
+}, { timezone: getTimezone() });
 
 // ── Routes: Emergency info ────────────────────────────────────────────────────
 app.get('/api/emergency', requireAuth, (req, res) => {
@@ -4681,7 +4712,7 @@ async function syncUSHolidays() {
   }
 }
 syncUSHolidays();
-cron.schedule('0 3 1 1 *', syncUSHolidays); // re-sync on Jan 1st each year
+cron.schedule('0 3 1 1 *', syncUSHolidays, { timezone: getTimezone() }); // re-sync on Jan 1st each year
 
 // ── Cleanup: expired messages + old delivered packages ────────────────────────
 cron.schedule('0 * * * *', () => {
@@ -4689,7 +4720,7 @@ cron.schedule('0 * * * *', () => {
     db.prepare("DELETE FROM messages WHERE expires_at <= datetime('now')").run();
     db.prepare("DELETE FROM packages WHERE delivered=1 AND created_at < datetime('now', '-3 days')").run();
   } catch (e) { console.error('[cleanup]', e?.message || e); }
-});
+}, { timezone: getTimezone() });
 
 // ── IMAP email polling ────────────────────────────────────────────────────────
 const g = k => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value || '';

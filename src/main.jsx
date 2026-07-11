@@ -3453,7 +3453,7 @@ function ChoresScreen({chores,setChores,goals=[],members=[],toastAdd}){
       const weekStart=new Date(d);
       weekStart.setHours(0,0,0,0);
       weekStart.setDate(weekStart.getDate()-weekStart.getDay());
-      const wk=weekStart.toISOString().slice(0,10);
+      const wk=localDate(weekStart);
       if(!seenWeeks.has(wk)){seenWeeks.set(wk,[]);groups.push({week:weekStart,key:wk,items:seenWeeks.get(wk)});}
       seenWeeks.get(wk).push(row);
     }
@@ -4061,6 +4061,7 @@ function WebhookSecretPanel({toastAdd}){
 /* ── Settings ────────────────────────────────────────────────────────── */
 function SettingsScreen({toastAdd,icsSources,setIcsSources,onDisplay,photos,setPhotos,clockFormat,setClockFormat,nightModeStart,setNightModeStart,nightModeEnd,setNightModeEnd,setRefreshMs,parseRefreshMs,setQuickActions,setRotationMs,setWifiQrData,darkMode,onDarkMode}){
   const isMobile=useIsMobile();
+  const [timezone,setTimezone]=useState('America/New_York');
   const [weatherCity,setWeatherCity]=useState('');
   const [weatherLat,setWeatherLat]=useState('33.749');
   const [weatherLon,setWeatherLon]=useState('-84.388');
@@ -4178,6 +4179,7 @@ function SettingsScreen({toastAdd,icsSources,setIcsSources,onDisplay,photos,setP
   const DIETARY_OPTIONS=['Vegetarian','Vegan','Gluten-free','Dairy-free','Nut-free','Low-carb','Keto','Paleo','Halal','Kosher'];
   useEffect(()=>{
     api.get('/api/settings').then(st=>{
+      if(st.timezone) setTimezone(st.timezone);
       if(st.weather_lat) setWeatherLat(st.weather_lat);
       if(st.weather_lon) setWeatherLon(st.weather_lon);
       if(st.weather_city){setWeatherCity(st.weather_city);setWeatherDisplay(st.weather_city);}
@@ -4671,6 +4673,34 @@ function SettingsScreen({toastAdd,icsSources,setIcsSources,onDisplay,photos,setP
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 16px',borderTop:`1px solid ${A.sep}`}}>
           <span style={{fontSize:15,color:A.label1}}>Clock</span>
           <SegControl value={clockFormat} onChange={v=>{setClockFormat(v);saveSetting('clock_format',v);}} options={['12h','24h']}/>
+        </div>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 16px',borderTop:`1px solid ${A.sep}`}}>
+          <div>
+            <div style={{fontSize:15,color:A.label1}}>Timezone</div>
+            <div style={{fontSize:12,color:A.label4,marginTop:2}}>Used for chore due dates, reminders, and daily/weekly emails</div>
+          </div>
+          <select value={timezone} onChange={e=>{const v=e.target.value;setTimezone(v);saveSetting('timezone',v);}} style={{background:A.inputBg,border:'none',borderRadius:A.rXs,padding:'6px 10px',fontSize:14,color:A.label1,cursor:'pointer'}}>
+            <optgroup label="US & Canada">
+              <option value="America/New_York">Eastern (New York)</option>
+              <option value="America/Chicago">Central (Chicago)</option>
+              <option value="America/Denver">Mountain (Denver)</option>
+              <option value="America/Phoenix">Mountain, no DST (Phoenix)</option>
+              <option value="America/Los_Angeles">Pacific (Los Angeles)</option>
+              <option value="America/Anchorage">Alaska (Anchorage)</option>
+              <option value="Pacific/Honolulu">Hawaii (Honolulu)</option>
+            </optgroup>
+            <optgroup label="Other">
+              <option value="America/Sao_Paulo">Brasília</option>
+              <option value="Europe/London">London</option>
+              <option value="Europe/Paris">Paris / Berlin</option>
+              <option value="Asia/Dubai">Dubai</option>
+              <option value="Asia/Kolkata">India</option>
+              <option value="Asia/Singapore">Singapore</option>
+              <option value="Asia/Tokyo">Tokyo</option>
+              <option value="Australia/Sydney">Sydney</option>
+              <option value="UTC">UTC</option>
+            </optgroup>
+          </select>
         </div>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 16px',borderTop:`1px solid ${A.sep}`}}>
           <span style={{fontSize:15,color:A.label1}}>Temperature</span>
@@ -6541,7 +6571,7 @@ function BudgetScreen({budget,setBudget,toastAdd}){
     toastAdd('Spending logged');
     const cat=(categories||[]).find(c=>c.id===catId);
     if(cat&&Number(cat.monthly_budget)>0){
-      const monthPrefix=new Date().toISOString().slice(0,7);
+      const monthPrefix=localDate().slice(0,7);
       const spent=[...(entries||[]),r]
         .filter(e=>e.category_id===cat.id&&e.date?.startsWith(monthPrefix))
         .reduce((s,e)=>s+Number(e.amount),0);
@@ -7271,7 +7301,7 @@ function HomeScreen({appliances,setAppliances,consumables,setConsumables,mainten
     if(tab!=='repairs'||repairsLoaded) return;
     api.get('/api/home/repairs').then(d=>{if(Array.isArray(d)) setRepairs(d);setRepairsLoaded(true);}).catch(()=>setRepairsLoaded(true));
   },[tab,repairsLoaded]);
-  const openNewRepair=()=>{setEditRepair(null);setRForm({...blankR,date:new Date().toISOString().slice(0,10)});setRDrawer(true);};
+  const openNewRepair=()=>{setEditRepair(null);setRForm({...blankR,date:localDate()});setRDrawer(true);};
   const openEditRepair=r=>{setEditRepair(r);setRForm({title:r.title,category:r.category||'Other',date:r.date||'',cost:r.cost?String(r.cost):'',contractor:r.contractor||'',warranty_until:r.warranty_until||'',description:r.description||''});setRDrawer(true);};
   const saveRepair=async()=>{
     if(!rForm.title.trim()){toastAdd('Title required','red');return;}

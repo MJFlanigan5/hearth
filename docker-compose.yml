@@ -5,12 +5,12 @@ services:
       - "7400:7400"
     volumes:
       - kith-data:/data
-      - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
     environment:
       - PORT=7400
       - DATA_DIR=/data
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - TZ=America/New_York
 
 volumes:
   kith-data:
