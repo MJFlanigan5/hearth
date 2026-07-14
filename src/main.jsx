@@ -3342,9 +3342,59 @@ function ChoresScreen({chores,setChores,goals=[],members=[],toastAdd}){
   const [photoChoreId,setPhotoChoreId]=useState(null);
   const _submitting=useRef(new Set());
   const [photoFile,setPhotoFile]=useState(null);
+  const [rewardsData,setRewardsData]=useState({rewards:[],balances:[]});
+  const [redemptions,setRedemptions]=useState([]);
+  const [rewardDrawer,setRewardDrawer]=useState(false);
+  const [editReward,setEditReward]=useState(null);
+  const blankReward={name:'',cost_points:10,emoji:'🎁'};
+  const [rewardForm,setRewardForm]=useState(blankReward);
   useEffect(()=>{
     if(tab==='history') api.get('/api/chores/history?limit=50').then(d=>Array.isArray(d)&&setChoreHistory(d)).catch(()=>{});
+    if(tab==='rewards'){
+      api.get('/api/rewards').then(d=>d&&setRewardsData(d)).catch(()=>{});
+      api.get('/api/rewards/redemptions?limit=20').then(d=>Array.isArray(d)&&setRedemptions(d)).catch(()=>{});
+    }
   },[tab]);
+
+  const reloadRewards=()=>{
+    api.get('/api/rewards').then(d=>d&&setRewardsData(d)).catch(()=>{});
+    api.get('/api/rewards/redemptions?limit=20').then(d=>Array.isArray(d)&&setRedemptions(d)).catch(()=>{});
+  };
+
+  const openNewReward=()=>{setEditReward(null);setRewardForm(blankReward);setRewardDrawer(true);};
+  const openEditReward=r=>{setEditReward(r);setRewardForm({name:r.name,cost_points:r.cost_points,emoji:r.emoji||'🎁'});setRewardDrawer(true);};
+
+  const saveReward=async()=>{
+    if(!rewardForm.name.trim()){toastAdd('Name required','red');return;}
+    const cost=parseInt(rewardForm.cost_points);
+    if(!cost||cost<=0){toastAdd('Cost must be a positive number','red');return;}
+    const payload={name:rewardForm.name.trim(),cost_points:cost,emoji:rewardForm.emoji||'🎁'};
+    if(editReward){
+      const r=await api.put(`/api/rewards/${editReward.id}`,{...payload,active:editReward.active??1}).catch(()=>null);
+      if(!r?.id){toastAdd('Failed to save','red');return;}
+      setRewardsData(p=>({...p,rewards:p.rewards.map(x=>x.id===r.id?r:x)}));
+    }else{
+      const r=await api.post('/api/rewards',payload).catch(()=>null);
+      if(!r?.id){toastAdd('Failed to save','red');return;}
+      setRewardsData(p=>({...p,rewards:[...p.rewards,r].sort((a,b)=>a.cost_points-b.cost_points)}));
+    }
+    setRewardDrawer(false);setEditReward(null);
+    toastAdd(editReward?'Reward updated':'Reward added');
+  };
+
+  const delReward=async id=>{
+    await api.del(`/api/rewards/${id}`).catch(()=>{});
+    setRewardsData(p=>({...p,rewards:p.rewards.filter(x=>x.id!==id)}));
+    setRewardDrawer(false);setEditReward(null);
+    toastAdd('Reward removed','blue');
+  };
+
+  const redeemReward=async(rewardId,memberId)=>{
+    const r=await api.post(`/api/rewards/${rewardId}/redeem`,{member_id:memberId}).catch(()=>null);
+    if(!r||r.error){toastAdd(r?.error||'Failed to redeem','red');return;}
+    toastAdd('Redeemed!');
+    reloadRewards();
+  };
 
   const openNew=()=>{
     setEditChore(null);
@@ -3477,9 +3527,10 @@ function ChoresScreen({chores,setChores,goals=[],members=[],toastAdd}){
           </p>
         </div>
         {tab==='chores'&&<Btn onClick={openNew}>+ Add Chore</Btn>}
+        {tab==='rewards'&&<Btn onClick={openNewReward}>+ Add Reward</Btn>}
       </div>
       <div style={{display:'flex',gap:4,background:A.inputBg,borderRadius:A.rSm,padding:3,marginBottom:20,width:'fit-content'}}>
-        {[{id:'chores',label:'Chores'},{id:'history',label:'History'}].map(t=>(
+        {[{id:'chores',label:'Chores'},{id:'history',label:'History'},{id:'rewards',label:'Rewards'}].map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:'7px 18px',borderRadius:A.rXs,border:'none',cursor:'pointer',fontSize:14,fontWeight:tab===t.id?700:500,background:tab===t.id?A.cardBg:'transparent',color:tab===t.id?A.label1:A.label3,boxShadow:tab===t.id?A.shadowSm:'none',transition:'all .15s'}}>{t.label}</button>
         ))}
       </div>
@@ -3584,6 +3635,72 @@ function ChoresScreen({chores,setChores,goals=[],members=[],toastAdd}){
           </>
         )}
       </Card>}
+
+      {tab==='rewards'&&(
+        <div>
+          <Card style={{marginBottom:20,padding:0,overflow:'hidden'}}>
+            <div style={{padding:'10px 16px',fontSize:11,fontWeight:700,color:A.label3,textTransform:'uppercase',letterSpacing:'.07em',borderBottom:`1px solid ${A.sep}`}}>Points Balance</div>
+            {rewardsData.balances.length===0?(
+              <div style={{padding:'16px',fontSize:14,color:A.label4}}>No family members yet.</div>
+            ):rewardsData.balances.map((m,i)=>(
+              <div key={m.id} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 16px',borderTop:i>0?`1px solid ${A.sep}`:'none'}}>
+                <div style={{width:30,height:30,borderRadius:'50%',background:m.color||A.blue,display:'flex',alignItems:'center',justifyContent:'center',fontSize:12,fontWeight:700,color:'#fff',flexShrink:0}}>{m.initials||m.name?.charAt(0)}</div>
+                <span style={{flex:1,fontSize:14,fontWeight:600,color:A.label1}}>{m.name}</span>
+                <span style={{fontSize:16,fontWeight:800,color:A.amber}}>{m.available_points} pts</span>
+              </div>
+            ))}
+          </Card>
+
+          <Card style={{overflow:'hidden',padding:0,marginBottom:20}}>
+            {rewardsData.rewards.length===0?(
+              <div style={{padding:'40px 24px',textAlign:'center'}}>
+                <div style={{fontSize:15,color:A.label3,fontWeight:500}}>No rewards yet — add one for the family to redeem points for.</div>
+              </div>
+            ):rewardsData.rewards.map((r,i)=>(
+              <div key={r.id} style={{padding:'14px 16px',borderTop:i>0?`1px solid ${A.sep}`:'none'}}>
+                <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
+                  <span style={{fontSize:20}}>{r.emoji}</span>
+                  <span style={{flex:1,fontSize:15,fontWeight:600,color:A.label1}}>{r.name}</span>
+                  <span style={{fontSize:13,fontWeight:700,color:A.amber}}>{r.cost_points} pts</span>
+                  {!r.active&&<Badge color={A.label5} bg={A.inputBg}>Inactive</Badge>}
+                  <button onClick={()=>openEditReward(r)} style={{background:'none',border:'none',color:A.label4,cursor:'pointer',fontSize:13,padding:'0 4px'}}>Edit</button>
+                </div>
+                {r.active===1&&(
+                  <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+                    {rewardsData.balances.map(m=>{
+                      const affordable=m.available_points>=r.cost_points;
+                      return(
+                        <button key={m.id} disabled={!affordable}
+                          onClick={()=>redeemReward(r.id,m.id)}
+                          style={{background:affordable?A.green:A.inputBg,color:affordable?'#fff':A.label5,border:'none',borderRadius:A.rXs,padding:'6px 12px',fontSize:12,fontWeight:600,cursor:affordable?'pointer':'not-allowed'}}>
+                          Redeem as {m.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ))}
+          </Card>
+
+          {redemptions.length>0&&(
+            <Card style={{overflow:'hidden',padding:0}}>
+              <div style={{padding:'10px 16px',fontSize:11,fontWeight:700,color:A.label3,textTransform:'uppercase',letterSpacing:'.07em',borderBottom:`1px solid ${A.sep}`}}>Redemption History</div>
+              {redemptions.map((r,i)=>(
+                <div key={r.id} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 16px',borderTop:i>0?`1px solid ${A.sep}`:'none'}}>
+                  <div style={{width:26,height:26,borderRadius:'50%',background:r.member_color||A.blue,display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:700,color:'#fff',flexShrink:0}}>{r.member_name?.charAt(0)||'?'}</div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:14,fontWeight:600,color:A.label1}}>{r.member_name||'Unknown'} redeemed {r.reward_name}</div>
+                    <div style={{fontSize:12,color:A.label4}}>{new Date(r.redeemed_at).toLocaleDateString()}</div>
+                  </div>
+                  <span style={{fontSize:13,fontWeight:700,color:A.label4}}>-{r.points_spent} pts</span>
+                </div>
+              ))}
+            </Card>
+          )}
+        </div>
+      )}
+
       {photoChoreId&&(
         <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.45)',zIndex:400,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
           <div style={{background:A.cardBg,borderRadius:A.r,padding:24,width:'100%',maxWidth:340,boxShadow:A.shadowLg}}>
@@ -3665,6 +3782,26 @@ function ChoresScreen({chores,setChores,goals=[],members=[],toastAdd}){
         <div style={{display:'flex',gap:8,marginTop:4}}>
           <Btn onClick={saveChore} full>{editChore?'Update Chore':'Save Chore'}</Btn>
           <Btn variant="ghost" onClick={()=>{setDrawerOpen(false);setEditChore(null);}} full>Cancel</Btn>
+        </div>
+      </Drawer>
+
+      <Drawer open={rewardDrawer} onClose={()=>{setRewardDrawer(false);setEditReward(null);setRewardForm(blankReward);}} title={editReward?'Edit Reward':'New Reward'}>
+        <FormGroup label="Name"><div style={{padding:'12px 16px'}}><Inp value={rewardForm.name} onChange={e=>setRewardForm(f=>({...f,name:e.target.value}))} placeholder="Extra screen time"/></div></FormGroup>
+        <FormGroup label="Cost (points)"><div style={{padding:'12px 16px'}}><Inp type="number" value={rewardForm.cost_points} onChange={e=>setRewardForm(f=>({...f,cost_points:e.target.value}))} placeholder="e.g. 10"/></div></FormGroup>
+        <FormGroup label="Emoji"><div style={{padding:'12px 16px'}}><Inp value={rewardForm.emoji} onChange={e=>setRewardForm(f=>({...f,emoji:e.target.value}))} placeholder="🎁"/></div></FormGroup>
+        {editReward&&(
+          <FormGroup label="Active">
+            <div style={{padding:'12px 16px'}}>
+              <label style={{display:'flex',alignItems:'center',gap:8,fontSize:14,color:A.label2}}>
+                <input type="checkbox" checked={editReward.active!==0} onChange={e=>setEditReward(r=>({...r,active:e.target.checked?1:0}))}/>
+                Visible for redemption
+              </label>
+            </div>
+          </FormGroup>
+        )}
+        <div style={{display:'flex',gap:8,marginTop:4}}>
+          <Btn onClick={saveReward} full>Save</Btn>
+          {editReward&&<Btn variant="ghost" onClick={()=>delReward(editReward.id)} full>Delete</Btn>}
         </div>
       </Drawer>
     </div>
@@ -6083,6 +6220,10 @@ function VehiclesScreen({vehicles,setVehicles,toastAdd}){
   const [mileageInput,setMileageInput]=useState('');
   const [mileageDate,setMileageDate]=useState(localDate());
   const [mileageNote,setMileageNote]=useState('');
+  const [mileageGallons,setMileageGallons]=useState('');
+  const [mileageCost,setMileageCost]=useState('');
+  const [mileageFullTank,setMileageFullTank]=useState(true);
+  const [historyOpenVid,setHistoryOpenVid]=useState(null);
 
   useEffect(()=>{
     vehicles.forEach(v=>{
@@ -6100,10 +6241,10 @@ function VehiclesScreen({vehicles,setVehicles,toastAdd}){
   const logMileage=async vid=>{
     const m=parseInt(mileageInput);
     if(!m||m<=0){toastAdd('Enter a valid mileage','red');return;}
-    const r=await api.post(`/api/vehicles/${vid}/mileage`,{miles:m,date:mileageDate,note:mileageNote}).catch(()=>null);
+    const r=await api.post(`/api/vehicles/${vid}/mileage`,{miles:m,date:mileageDate,note:mileageNote,gallons:parseFloat(mileageGallons)||0,cost:parseFloat(mileageCost)||0,full_tank:mileageFullTank?1:0}).catch(()=>null);
     if(!r?.id){toastAdd('Failed to log','red');return;}
-    setMileageLogs(p=>({...p,[vid]:[r,...(p[vid]||[])]}));
-    setMileageFormVid(null);setMileageInput('');setMileageNote('');setMileageDate(localDate());
+    await loadMileage(vid); // refetch so MPG is recomputed correctly across the full fill-to-fill chain
+    setMileageFormVid(null);setMileageInput('');setMileageNote('');setMileageDate(localDate());setMileageGallons('');setMileageCost('');setMileageFullTank(true);
     toastAdd('Mileage logged');
   };
 
@@ -6113,23 +6254,22 @@ function VehiclesScreen({vehicles,setVehicles,toastAdd}){
     setMileageLogs(p=>({...p,[vid]:(p[vid]||[]).filter(x=>x.id!==mid)}));
   };
 
-  const svcStatus=s=>{
-    if(!s.next_due_date) return 'gray';
-    const d=daysUntil(s.next_due_date);
-    if(d<0) return 'red';
-    if(d<=30) return 'amber';
-    return 'green';
-  };
-  const svcColor=st=>({red:A.red,amber:A.amber,green:A.green,gray:A.label5}[st]);
+  const svcColor=st=>({overdue:A.red,due_soon:A.amber,ok:A.green}[st]||A.label5);
   const dueLabel=s=>{
-    if(!s.next_due_date){
+    const parts=[];
+    if(s.next_due_date){
+      const d=daysUntil(s.next_due_date);
+      parts.push(d<0?`Overdue by ${Math.abs(d)}d`:d===0?'Due today':`Due in ${d}d`);
+    }
+    if(s.interval_miles>0&&s.miles_remaining!=null){
+      const mi=Math.abs(s.miles_remaining);
+      parts.push(s.miles_remaining<=0?`${mi.toLocaleString()} mi overdue`:`${mi.toLocaleString()} mi remaining`);
+    }
+    if(!parts.length){
       if(s.interval_miles>0) return `Every ${Number(s.interval_miles).toLocaleString()} mi`;
       return 'No schedule set';
     }
-    const d=daysUntil(s.next_due_date);
-    if(d<0) return `Overdue by ${Math.abs(d)} day${Math.abs(d)===1?'':'s'}`;
-    if(d===0) return 'Due today';
-    return `Due in ${d} day${d===1?'':'s'}`;
+    return parts.join(' · ');
   };
   const intervalLabel=s=>{
     const parts=[];
@@ -6234,25 +6374,58 @@ function VehiclesScreen({vehicles,setVehicles,toastAdd}){
                 {(()=>{
                   const logs=mileageLogs[v.id];
                   const latestMiles=logs&&logs.length>0?logs[0].miles:null;
+                  const mpgEntries=(logs||[]).filter(l=>l.mpg!=null);
+                  const avgMpg=mpgEntries.length?Math.round((mpgEntries.reduce((s,l)=>s+l.mpg,0)/mpgEntries.length)*10)/10:null;
                   return(
-                    <div style={{padding:'12px 18px',borderBottom:`1px solid ${A.sep}`,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                    <div style={{padding:'12px 18px',borderBottom:`1px solid ${A.sep}`,display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:8}}>
                       <div style={{fontSize:13,color:A.label3}}>
                         {latestMiles!=null?(
-                          <span><span style={{fontWeight:700,color:A.label1}}>{Number(latestMiles).toLocaleString()}</span> mi current odometer</span>
+                          <span><span style={{fontWeight:700,color:A.label1}}>{Number(latestMiles).toLocaleString()}</span> mi current odometer
+                            {avgMpg!=null&&<span style={{color:A.label4}}> · {avgMpg} mpg avg</span>}
+                          </span>
                         ):(
                           <span style={{color:A.label4}}>No mileage logged</span>
                         )}
                       </div>
-                      <button onClick={()=>{
-                        if(!mileageLogs[v.id]) loadMileage(v.id);
-                        setMileageFormVid(mileageFormVid===v.id?null:v.id);
-                        setMileageInput('');setMileageNote('');setMileageDate(localDate());
-                      }} style={{background:'none',border:`1.5px solid ${A.sep}`,borderRadius:20,padding:'4px 12px',fontSize:12,fontWeight:600,color:A.label3,cursor:'pointer'}}>
-                        {mileageFormVid===v.id?'Cancel':'Log miles'}
-                      </button>
+                      <div style={{display:'flex',gap:6}}>
+                        <button onClick={()=>{
+                          if(!mileageLogs[v.id]) loadMileage(v.id);
+                          setHistoryOpenVid(historyOpenVid===v.id?null:v.id);
+                        }} style={{background:'none',border:`1.5px solid ${A.sep}`,borderRadius:20,padding:'4px 12px',fontSize:12,fontWeight:600,color:A.label3,cursor:'pointer'}}>
+                          {historyOpenVid===v.id?'Hide history':'History'}
+                        </button>
+                        <button onClick={()=>{
+                          if(!mileageLogs[v.id]) loadMileage(v.id);
+                          setMileageFormVid(mileageFormVid===v.id?null:v.id);
+                          setMileageInput('');setMileageNote('');setMileageDate(localDate());setMileageGallons('');setMileageCost('');setMileageFullTank(true);
+                        }} style={{background:'none',border:`1.5px solid ${A.sep}`,borderRadius:20,padding:'4px 12px',fontSize:12,fontWeight:600,color:A.label3,cursor:'pointer'}}>
+                          {mileageFormVid===v.id?'Cancel':'Log miles'}
+                        </button>
+                      </div>
                     </div>
                   );
                 })()}
+                {historyOpenVid===v.id&&(
+                  <div style={{padding:'4px 18px',borderBottom:`1px solid ${A.sep}`}}>
+                    {(!mileageLogs[v.id]||mileageLogs[v.id].length===0)?(
+                      <div style={{fontSize:13,color:A.label4,padding:'10px 0'}}>No mileage logged yet.</div>
+                    ):(
+                      mileageLogs[v.id].map(l=>(
+                        <div key={l.id} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 0',borderTop:`1px solid ${A.sep}`}}>
+                          <div style={{flex:1,minWidth:0,fontSize:13,color:A.label2}}>
+                            {l.date} · {Number(l.miles).toLocaleString()} mi
+                            {l.gallons>0&&` · ${l.gallons}gal`}
+                            {l.cost>0&&` · $${Number(l.cost).toFixed(2)}`}
+                            {l.mpg!=null&&<span style={{color:A.green,fontWeight:600}}> · {l.mpg} mpg</span>}
+                            {l.gallons>0&&!l.full_tank&&<span style={{color:A.label5}}> · partial</span>}
+                            {l.note&&<div style={{fontSize:11,color:A.label5,marginTop:2}}>{l.note}</div>}
+                          </div>
+                          <button onClick={()=>delMileage(v.id,l.id)} style={{background:'none',border:'none',color:A.label5,cursor:'pointer',fontSize:12,flexShrink:0}}>Delete</button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
                 {mileageFormVid===v.id&&(
                   <div style={{padding:'12px 18px',borderBottom:`1px solid ${A.sep}`,background:A.inputBg}}>
                     <div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}>
@@ -6264,6 +6437,18 @@ function VehiclesScreen({vehicles,setVehicles,toastAdd}){
                         <div style={{fontSize:11,fontWeight:600,color:A.label4,marginBottom:4}}>Date</div>
                         <Inp type="date" value={mileageDate} onChange={e=>setMileageDate(e.target.value)}/>
                       </div>
+                      <div style={{flex:'1 1 100px'}}>
+                        <div style={{fontSize:11,fontWeight:600,color:A.label4,marginBottom:4}}>Gallons</div>
+                        <Inp type="number" step="0.01" value={mileageGallons} onChange={e=>setMileageGallons(e.target.value)} placeholder="e.g. 12.4"/>
+                      </div>
+                      <div style={{flex:'1 1 100px'}}>
+                        <div style={{fontSize:11,fontWeight:600,color:A.label4,marginBottom:4}}>Cost ($)</div>
+                        <Inp type="number" step="0.01" value={mileageCost} onChange={e=>setMileageCost(e.target.value)} placeholder="e.g. 45.20"/>
+                      </div>
+                      <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:A.label3,paddingBottom:9}}>
+                        <input type="checkbox" checked={mileageFullTank} onChange={e=>setMileageFullTank(e.target.checked)}/>
+                        Full tank
+                      </label>
                       <div style={{flex:'2 1 180px'}}>
                         <div style={{fontSize:11,fontWeight:600,color:A.label4,marginBottom:4}}>Note (optional)</div>
                         <Inp value={mileageNote} onChange={e=>setMileageNote(e.target.value)} placeholder="e.g. Oil change"/>
@@ -6276,24 +6461,14 @@ function VehiclesScreen({vehicles,setVehicles,toastAdd}){
                   <div style={{padding:'16px 18px',fontSize:14,color:A.label4}}>No services tracked yet.</div>
                 )}
                 {(v.services||[]).map((s,i)=>{
-                  const st=svcStatus(s);
-                  const logs=mileageLogs[v.id];
-                  const latestMiles=logs&&logs.length>0?logs[0].miles:null;
-                  let milesUntil=null;
-                  if(s.interval_miles>0&&latestMiles!=null&&s.last_done_miles>0){
-                    const milesSinceService=latestMiles-s.last_done_miles;
-                    milesUntil=s.interval_miles-milesSinceService;
-                  }
+                  const st=s.status||'ok';
                   return(
                     <div key={s.id} style={{display:'flex',alignItems:'center',gap:12,padding:'14px 18px',borderTop:i>0?`1px solid ${A.sep}`:'none'}}>
                       <div style={{width:8,height:8,borderRadius:'50%',background:svcColor(st),flexShrink:0}}/>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{fontSize:15,fontWeight:600,color:A.label1}}>{s.name}</div>
-                        <div style={{fontSize:12,color:st==='red'?A.red:A.label5,marginTop:2}}>
+                        <div style={{fontSize:12,color:st==='overdue'?A.red:A.label5,marginTop:2}}>
                           {dueLabel(s)}{intervalLabel(s)?` · ${intervalLabel(s)}`:''}
-                          {milesUntil!=null&&<span style={{marginLeft:4,color:milesUntil<=0?A.red:milesUntil<=500?A.amber:A.label5}}>
-                            {milesUntil<=0?` · ${Math.abs(milesUntil).toLocaleString()} mi overdue`:` · ${milesUntil.toLocaleString()} mi until service`}
-                          </span>}
                         </div>
                       </div>
                       <button onClick={()=>openDone(v.id,s)} style={{background:A.inputBg,border:`1.5px solid ${A.sep}`,borderRadius:20,padding:'5px 14px',fontSize:12,fontWeight:600,color:A.label3,cursor:'pointer',flexShrink:0,whiteSpace:'nowrap'}}>Mark done</button>
@@ -6374,6 +6549,134 @@ function VehiclesScreen({vehicles,setVehicles,toastAdd}){
         <div style={{padding:'12px 16px',display:'flex',gap:8}}>
           <Btn onClick={saveService} full>Save</Btn>
           {editService&&<Btn variant="ghost" onClick={()=>delService(sVehicleId,editService.id)} full>Delete</Btn>}
+        </div>
+      </Drawer>
+    </div>
+  );
+}
+
+/* ── Documents Screen ────────────────────────────────────────────────────── */
+const DOC_CATEGORIES=['Insurance','Medical','Auto','Financial','Legal','Manuals','Other'];
+
+function DocumentsScreen({members=[],toastAdd}){
+  const isMobile=useIsMobile();
+  const [documents,setDocuments]=useState([]);
+  const [drawerOpen,setDrawerOpen]=useState(false);
+  const blankForm={title:'',category:'Other',member_id:'',file:null};
+  const [form,setForm]=useState(blankForm);
+  const [uploading,setUploading]=useState(false);
+
+  useEffect(()=>{
+    api.get('/api/documents').then(d=>Array.isArray(d)&&setDocuments(d)).catch(()=>{});
+  },[]);
+
+  const openNew=()=>{setForm(blankForm);setDrawerOpen(true);};
+
+  const upload=()=>{
+    if(!form.title.trim()){toastAdd('Title required','red');return;}
+    if(!form.file){toastAdd('Choose a file','red');return;}
+    setUploading(true);
+    const reader=new FileReader();
+    reader.onload=async ev=>{
+      const r=await api.post('/api/documents',{title:form.title.trim(),category:form.category,member_id:form.member_id||null,filename:form.file.name,data:ev.target.result}).catch(()=>null);
+      setUploading(false);
+      if(!r?.id){toastAdd('Upload failed','red');return;}
+      setDocuments(p=>[r,...p]);
+      setDrawerOpen(false);setForm(blankForm);
+      toastAdd('Document uploaded');
+    };
+    reader.onerror=()=>{setUploading(false);toastAdd('Upload failed','red');};
+    reader.readAsDataURL(form.file);
+  };
+
+  const delDoc=async id=>{
+    await api.del(`/api/documents/${id}`).catch(()=>{});
+    setDocuments(p=>p.filter(d=>d.id!==id));
+    toastAdd('Document removed','blue');
+  };
+
+  // requireAuth on the file route means a plain <a href> won't carry the
+  // bearer token, so fetch it as a blob and open via an object URL instead.
+  const openDoc=async doc=>{
+    try{
+      const res=await fetch(`/api/documents/${doc.id}/file`,{headers:{..._authHdr()}});
+      if(!res.ok){toastAdd('Failed to open document','red');return;}
+      const blob=await res.blob();
+      const url=URL.createObjectURL(blob);
+      window.open(url,'_blank');
+      setTimeout(()=>URL.revokeObjectURL(url),60000);
+    }catch{toastAdd('Failed to open document','red');}
+  };
+
+  const grouped=useMemo(()=>{
+    const g={};
+    documents.forEach(d=>{ (g[d.category||'Other']=g[d.category||'Other']||[]).push(d); });
+    return g;
+  },[documents]);
+
+  const memberName=id=>members.find(m=>m.id===id)?.name;
+
+  return(
+    <div>
+      <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:24}}>
+        <h1 style={{fontSize:isMobile?34:44,fontWeight:800,letterSpacing:'-.05em',lineHeight:1.05}}>Documents</h1>
+        <Btn onClick={openNew}>+ Upload</Btn>
+      </div>
+
+      {documents.length===0?(
+        <Card style={{padding:'52px 24px',textAlign:'center'}}>
+          <div style={{fontSize:13,fontWeight:700,color:A.label5,textTransform:'uppercase',letterSpacing:'.08em',marginBottom:10}}>No documents</div>
+          <div style={{fontSize:15,color:A.label3,fontWeight:500}}>Upload insurance cards, manuals, and other family paperwork to keep them all in one place.</div>
+        </Card>
+      ):(
+        Object.keys(grouped).sort().map(cat=>(
+          <div key={cat} style={{marginBottom:20}}>
+            <div style={{fontSize:12,fontWeight:700,color:A.label4,textTransform:'uppercase',letterSpacing:'.07em',marginBottom:8}}>{cat}</div>
+            <Card style={{overflow:'hidden',padding:0}}>
+              {grouped[cat].map((d,i)=>(
+                <div key={d.id} style={{display:'flex',alignItems:'center',gap:12,padding:'14px 18px',borderTop:i>0?`1px solid ${A.sep}`:'none'}}>
+                  <div style={{flex:1,minWidth:0,cursor:'pointer'}} onClick={()=>openDoc(d)}>
+                    <div style={{fontSize:15,fontWeight:600,color:A.label1}}>{d.title}</div>
+                    <div style={{fontSize:12,color:A.label4,marginTop:2}}>
+                      {new Date(d.created_at).toLocaleDateString()}{memberName(d.member_id)?` · ${memberName(d.member_id)}`:''}
+                    </div>
+                  </div>
+                  <button onClick={()=>openDoc(d)} style={{background:A.inputBg,border:`1.5px solid ${A.sep}`,borderRadius:20,padding:'5px 14px',fontSize:12,fontWeight:600,color:A.label3,cursor:'pointer',flexShrink:0}}>View</button>
+                  <button onClick={()=>delDoc(d.id)} style={{background:'none',border:'none',color:A.label4,cursor:'pointer',fontSize:13,padding:'0 4px',flexShrink:0}}>Delete</button>
+                </div>
+              ))}
+            </Card>
+          </div>
+        ))
+      )}
+
+      <Drawer open={drawerOpen} onClose={()=>{setDrawerOpen(false);setForm(blankForm);}} title="Upload Document">
+        <FormGroup label="Title"><div style={{padding:'12px 16px'}}><Inp value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))} placeholder="Car insurance card"/></div></FormGroup>
+        <FormGroup label="Category">
+          <div style={{padding:'12px 16px'}}>
+            <Sel value={form.category} onChange={e=>setForm(f=>({...f,category:e.target.value}))}>
+              {DOC_CATEGORIES.map(c=><option key={c}>{c}</option>)}
+            </Sel>
+          </div>
+        </FormGroup>
+        {members.length>0&&(
+          <FormGroup label="Linked to (optional)">
+            <div style={{padding:'12px 16px'}}>
+              <select value={form.member_id} onChange={e=>setForm(f=>({...f,member_id:e.target.value}))}
+                style={{width:'100%',padding:'10px 12px',borderRadius:A.rXs,border:`1px solid ${A.sep}`,background:A.inputBg,fontSize:15,color:A.label1}}>
+                <option value="">None</option>
+                {members.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+            </div>
+          </FormGroup>
+        )}
+        <FormGroup label="File">
+          <div style={{padding:'12px 16px'}}>
+            <input type="file" onChange={e=>setForm(f=>({...f,file:e.target.files?.[0]||null}))} style={{fontSize:14,width:'100%'}}/>
+          </div>
+        </FormGroup>
+        <div style={{padding:'12px 16px'}}>
+          <Btn onClick={upload} full disabled={uploading}>{uploading?'Uploading…':'Upload'}</Btn>
         </div>
       </Drawer>
     </div>
@@ -8797,6 +9100,7 @@ function ManageMode({onDisplay,onLogout,events,setEvents,chores,setChores,grocer
     {id:'subscriptions',label:'Subscriptions',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><rect x="2" y="4" width="13" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.5"/><path d="M2 7h13" stroke="currentColor" strokeWidth="1.5"/><path d="M5 10h2M9 10h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>},
     {id:'budget',label:'Budget',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><rect x="2" y="9" width="3" height="6" rx="1" fill="currentColor" opacity=".5"/><rect x="7" y="5" width="3" height="10" rx="1" fill="currentColor" opacity=".7"/><rect x="12" y="2" width="3" height="13" rx="1" fill="currentColor"/></svg>},
     {id:'vehicles',label:'Vehicles',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><path d="M2 10l1.5-4.5A1 1 0 014.4 5h8.2a1 1 0 01.9.5L15 10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><rect x="1" y="10" width="15" height="4" rx="1.5" stroke="currentColor" strokeWidth="1.5"/><circle cx="4.5" cy="14" r="1.5" fill="currentColor"/><circle cx="12.5" cy="14" r="1.5" fill="currentColor"/></svg>},
+    {id:'documents',label:'Documents',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><path d="M4 1.5h6l3 3v11a1 1 0 01-1 1H4a1 1 0 01-1-1v-13a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/><path d="M10 1.5v3h3" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/><path d="M5 9h6M5 12h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>},
     {id:'home',label:'Home',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><path d="M2 7.5L8.5 2 15 7.5V15a1 1 0 01-1 1H3a1 1 0 01-1-1V7.5z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/><path d="M6 16v-6h5v6" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg>},
     {id:'pets',label:'Pets',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><circle cx="5" cy="4" r="1.5" fill="currentColor"/><circle cx="12" cy="4" r="1.5" fill="currentColor"/><circle cx="3" cy="8" r="1.5" fill="currentColor"/><circle cx="14" cy="8" r="1.5" fill="currentColor"/><ellipse cx="8.5" cy="12" rx="4" ry="3.5" stroke="currentColor" strokeWidth="1.5"/></svg>},
     {id:'contacts',label:'Contacts',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><circle cx="8.5" cy="6" r="3" stroke="currentColor" strokeWidth="1.5"/><path d="M2 15c0-3.31 2.91-6 6.5-6s6.5 2.69 6.5 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>},
@@ -8828,6 +9132,7 @@ function ManageMode({onDisplay,onLogout,events,setEvents,chores,setChores,grocer
     subscriptions: <SubscriptionsScreen subscriptions={subscriptions} setSubscriptions={setSubscriptions} toastAdd={toastAdd}/>,
     budget:     <BudgetScreen budget={budget} setBudget={setBudget} toastAdd={toastAdd}/>,
     vehicles:   <VehiclesScreen vehicles={vehicles} setVehicles={setVehicles} toastAdd={toastAdd}/>,
+    documents:  <DocumentsScreen members={members} toastAdd={toastAdd}/>,
     home:       <HomeScreen appliances={appliances} setAppliances={setAppliances} consumables={consumables} setConsumables={setConsumables} maintenanceItems={maintenanceItems} setMaintenanceItems={setMaintenanceItems} toastAdd={toastAdd}/>,
     pets:       <PetsScreen pets={pets} setPets={setPets} toastAdd={toastAdd}/>,
     contacts:   <ContactsScreen contacts={contacts} setContacts={setContacts} toastAdd={toastAdd}/>,

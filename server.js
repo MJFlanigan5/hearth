@@ -30,6 +30,11 @@ const PHOTOS_DIR = path.join(process.env.DATA_DIR || path.join(__dirname, 'data'
 fs.mkdirSync(PHOTOS_DIR, { recursive: true });
 app.use('/photos', express.static(PHOTOS_DIR));
 
+// Documents are NOT static-mounted (unlike photos) — served only through an
+// authenticated route since they may contain sensitive family paperwork.
+const DOCS_DIR = path.join(process.env.DATA_DIR || path.join(__dirname, 'data'), 'documents');
+fs.mkdirSync(DOCS_DIR, { recursive: true });
+
 app.set('trust proxy', 1); // trust first proxy (nginx/Caddy) so req.ip uses X-Forwarded-For
 app.use(express.json({ limit: '20mb' }));
 app.use(express.static(path.join(__dirname, 'dist')));
@@ -712,6 +717,75 @@ app.get('/api/chores/:id/history', requireAuth, (req, res) => {
   res.json(rows);
 });
 
+// ── Routes: Rewards ───────────────────────────────────────────────────────────
+// Spendable balance = lifetime chore points earned minus lifetime points
+// already redeemed. Deliberately separate from the weekly leaderboard above.
+function getAvailablePoints(memberId) {
+  const earned = db.prepare('SELECT COALESCE(SUM(points),0) as t FROM chore_completions WHERE member_id=?').get(memberId).t;
+  const spent = db.prepare('SELECT COALESCE(SUM(points_spent),0) as t FROM reward_redemptions WHERE member_id=?').get(memberId).t;
+  return earned - spent;
+}
+
+app.get('/api/rewards', requireAuth, (req, res) => {
+  const rewards = db.prepare('SELECT * FROM rewards ORDER BY cost_points ASC').all();
+  const members = db.prepare('SELECT id, name, color, initials FROM family_members ORDER BY created_at').all();
+  const balances = members.map(m => ({ ...m, available_points: getAvailablePoints(m.id) }));
+  res.json({ rewards, balances });
+});
+
+app.post('/api/rewards', requireAdmin, (req, res) => {
+  const { name, cost_points, emoji='🎁' } = req.body || {};
+  if (!name?.trim()) return res.status(400).json({ error: 'name required' });
+  const cost = parseInt(cost_points);
+  if (!cost || cost <= 0) return res.status(400).json({ error: 'cost_points must be a positive number' });
+  const row = db.prepare('INSERT INTO rewards (name,cost_points,emoji) VALUES (?,?,?) RETURNING *').get(name.trim(), cost, emoji);
+  res.json(row);
+});
+
+app.put('/api/rewards/:id', requireAdmin, (req, res) => {
+  const { name, cost_points, emoji='🎁', active=1 } = req.body || {};
+  if (!name?.trim()) return res.status(400).json({ error: 'name required' });
+  const cost = parseInt(cost_points);
+  if (!cost || cost <= 0) return res.status(400).json({ error: 'cost_points must be a positive number' });
+  const row = db.prepare('UPDATE rewards SET name=?,cost_points=?,emoji=?,active=? WHERE id=? RETURNING *')
+    .get(name.trim(), cost, emoji, active ? 1 : 0, Number(req.params.id));
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(row);
+});
+
+app.delete('/api/rewards/:id', requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM rewards WHERE id=?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+app.get('/api/rewards/redemptions', requireAuth, (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  const rows = db.prepare(`
+    SELECT rr.*, fm.name as member_name, fm.color as member_color
+    FROM reward_redemptions rr LEFT JOIN family_members fm ON fm.id = rr.member_id
+    ORDER BY rr.redeemed_at DESC LIMIT ?
+  `).all(limit);
+  res.json(rows);
+});
+
+app.post('/api/rewards/:id/redeem', requireAuth, (req, res) => {
+  // Members can only redeem their own points — admin may redeem on behalf of
+  // any member (mirrors the chore-completion pattern: never trust a client-
+  // supplied member_id for a non-admin session).
+  const memberId = req.user.role === 'admin' ? Number(req.body?.member_id) : Number(req.user.sub);
+  if (!memberId) return res.status(400).json({ error: 'member_id required' });
+  const reward = db.prepare('SELECT * FROM rewards WHERE id=? AND active=1').get(Number(req.params.id));
+  if (!reward) return res.status(404).json({ error: 'Reward not found' });
+  const member = db.prepare('SELECT id FROM family_members WHERE id=?').get(memberId);
+  if (!member) return res.status(404).json({ error: 'Member not found' });
+  const available = getAvailablePoints(memberId);
+  if (available < reward.cost_points) return res.status(400).json({ error: `Not enough points — has ${available}, needs ${reward.cost_points}` });
+  const row = db.prepare('INSERT INTO reward_redemptions (member_id,reward_id,reward_name,points_spent) VALUES (?,?,?,?) RETURNING *')
+    .get(memberId, reward.id, reward.name, reward.cost_points);
+  broadcastSSE('rewards', { action: 'reload' });
+  res.json({ ...row, remaining_points: available - reward.cost_points });
+});
+
 // ── Routes: Grocery ───────────────────────────────────────────────────────────
 app.get('/api/grocery', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM grocery ORDER BY checked, category, created_at').all());
@@ -1340,10 +1414,16 @@ async function sendHomeReminders() {
     if (r.status === 'overdue') items.push(`${r.name} for ${r.pet_name} (overdue)`);
     else if (r.status === 'due_soon' && r.days_remaining <= 14) items.push(`${r.name} for ${r.pet_name} (${r.days_remaining}d)`);
   }
-  const svcs = db.prepare(`SELECT vs.*, v.name as vehicle_name FROM vehicle_services vs JOIN vehicles v ON vs.vehicle_id=v.id WHERE vs.next_due_date!=''`).all();
-  for (const s of svcs) {
-    const days = homeDaysUntil(s.next_due_date);
-    if (days <= 14) items.push(days < 0 ? `${s.name} — ${s.vehicle_name} (${Math.abs(days)}d overdue)` : `${s.name} — ${s.vehicle_name} (${days}d)`);
+  const svcs = db.prepare(`SELECT vs.*, v.name as vehicle_name FROM vehicle_services vs JOIN vehicles v ON vs.vehicle_id=v.id WHERE vs.next_due_date!='' OR vs.interval_miles>0`).all();
+  const getLatestMilesForDigest = db.prepare('SELECT miles FROM vehicle_mileage WHERE vehicle_id=? ORDER BY date DESC, id DESC LIMIT 1');
+  for (const raw of svcs) {
+    const currentMiles = getLatestMilesForDigest.get(raw.vehicle_id)?.miles || 0;
+    const s = computeVehicleServiceStatus(raw, currentMiles);
+    if (s.days_remaining === null || s.days_remaining > 14) continue; // preserve the digest's tighter 14-day cutoff
+    const suffix = s.due_reason === 'miles'
+      ? (s.status === 'overdue' ? `${Math.abs(s.miles_remaining)} mi overdue` : `${s.miles_remaining} mi left`)
+      : (s.status === 'overdue' ? `${Math.abs(s.days_remaining)}d overdue` : `${s.days_remaining}d`);
+    items.push(`${s.name} — ${s.vehicle_name} (${suffix})`);
   }
   if (!items.length) return;
   await sendPushToAll({
@@ -1462,6 +1542,7 @@ app.delete('/api/members/:id', requireAdmin, (req, res) => {
   db.prepare('UPDATE events SET member_id=NULL WHERE member_id=?').run(id);
   db.prepare('UPDATE chores SET member_id=NULL WHERE member_id=?').run(id);
   db.prepare('DELETE FROM chore_completions WHERE member_id=?').run(id);
+  db.prepare('DELETE FROM reward_redemptions WHERE member_id=?').run(id);
   db.prepare('DELETE FROM member_health WHERE member_id=?').run(id);
   db.prepare('DELETE FROM family_members WHERE id=?').run(id);
   res.json({ ok: true });
@@ -2983,6 +3064,46 @@ app.delete('/api/photos/:id', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Routes: Documents ─────────────────────────────────────────────────────────
+app.get('/api/documents', requireAuth, (req, res) => {
+  res.json(db.prepare('SELECT * FROM documents ORDER BY created_at DESC').all());
+});
+
+app.post('/api/documents', requireAdmin, async (req, res) => {
+  const { title, category = 'Other', member_id = null, filename, data } = req.body;
+  if (!title?.trim() || !filename || !data?.startsWith('data:')) return res.status(400).json({ error: 'title, filename, and file data required' });
+  const mime_type = data.slice(5, data.indexOf(';')) || 'application/octet-stream';
+  const ext = (filename.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '') || 'bin';
+  const safe = `${Date.now()}.${ext}`;
+  try {
+    await fs.promises.writeFile(path.join(DOCS_DIR, safe), Buffer.from(data.split(',')[1], 'base64'));
+    const r = db.prepare('INSERT INTO documents (title, category, member_id, filename, mime_type) VALUES (?,?,?,?,?)')
+      .run(title.trim(), category.trim() || 'Other', member_id, safe, mime_type);
+    res.json({ id: r.lastInsertRowid, title: title.trim(), category, member_id, filename: safe, mime_type });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/documents/:id/file', requireAuth, (req, res) => {
+  const doc = db.prepare('SELECT * FROM documents WHERE id=?').get(Number(req.params.id));
+  if (!doc) return res.status(404).json({ error: 'not found' });
+  const filePath = path.join(DOCS_DIR, doc.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'file missing' });
+  res.setHeader('Content-Type', doc.mime_type || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(doc.title)}"`);
+  res.sendFile(filePath);
+});
+
+app.delete('/api/documents/:id', requireAdmin, (req, res) => {
+  const doc = db.prepare('SELECT * FROM documents WHERE id=?').get(Number(req.params.id));
+  if (doc) {
+    try { fs.unlinkSync(path.join(DOCS_DIR, doc.filename)); } catch {}
+    db.prepare('DELETE FROM documents WHERE id=?').run(Number(req.params.id));
+  }
+  res.json({ ok: true });
+});
+
 // ── Routes: Bookmarks ─────────────────────────────────────────────────────────
 app.get('/api/bookmarks', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM bookmarks ORDER BY category, id').all());
@@ -3336,7 +3457,15 @@ app.delete('/api/bills/:id/pay/:period', requireAdmin, (req, res) => {
 app.get('/api/vehicles', requireAuth, (req, res) => {
   const vehicles = db.prepare('SELECT * FROM vehicles ORDER BY name').all();
   const services = db.prepare('SELECT * FROM vehicle_services ORDER BY name').all();
-  res.json(vehicles.map(v => ({ ...v, services: services.filter(s => s.vehicle_id === v.id) })));
+  const getLatestMiles = db.prepare('SELECT miles FROM vehicle_mileage WHERE vehicle_id=? ORDER BY date DESC, id DESC LIMIT 1');
+  res.json(vehicles.map(v => {
+    const currentMiles = getLatestMiles.get(v.id)?.miles || 0;
+    return {
+      ...v,
+      current_miles: currentMiles,
+      services: services.filter(s => s.vehicle_id === v.id).map(s => computeVehicleServiceStatus(s, currentMiles)),
+    };
+  }));
 });
 
 app.get('/api/vehicles/vin/:vin', requireAuth, async (req, res) => {
@@ -3428,14 +3557,34 @@ app.post('/api/vehicles/:id/services/:sid/done', requireAdmin, (req, res) => {
   res.json(row);
 });
 
+// MPG uses the standard fill-to-fill method: miles driven since the last
+// full-tank fill-up, divided by gallons put in at THIS fill-up. Partial
+// fill-ups break the chain (no reliable prior full-tank point), so they
+// don't get an mpg figure themselves but don't invalidate future ones.
+function withMpg(entriesAscending) {
+  let lastFullTankMiles = null;
+  const out = [];
+  for (const e of entriesAscending) {
+    let mpg = null;
+    if (e.full_tank && e.gallons > 0 && lastFullTankMiles !== null && e.miles > lastFullTankMiles) {
+      mpg = Math.round(((e.miles - lastFullTankMiles) / e.gallons) * 10) / 10;
+    }
+    out.push({ ...e, mpg });
+    if (e.full_tank && e.gallons > 0) lastFullTankMiles = e.miles;
+  }
+  return out;
+}
+
 app.get('/api/vehicles/:id/mileage', requireAuth, (req, res) => {
-  res.json(db.prepare('SELECT * FROM vehicle_mileage WHERE vehicle_id=? ORDER BY date DESC, id DESC').all(Number(req.params.id)));
+  const ascending = db.prepare('SELECT * FROM vehicle_mileage WHERE vehicle_id=? ORDER BY date ASC, id ASC').all(Number(req.params.id));
+  res.json(withMpg(ascending).reverse());
 });
 
 app.post('/api/vehicles/:id/mileage', requireAdmin, (req, res) => {
-  const { miles, date, note='' } = req.body || {};
+  const { miles, date, note='', gallons=0, cost=0, full_tank=1 } = req.body || {};
   if (!miles || isNaN(Number(miles))) return res.status(400).json({ error: 'miles required' });
-  const r = db.prepare('INSERT INTO vehicle_mileage (vehicle_id,miles,date,note) VALUES (?,?,?,?)').run(Number(req.params.id), Number(miles), date || localDate(), note);
+  const r = db.prepare('INSERT INTO vehicle_mileage (vehicle_id,miles,date,note,gallons,cost,full_tank) VALUES (?,?,?,?,?,?,?)')
+    .run(Number(req.params.id), Number(miles), date || localDate(), note, Number(gallons)||0, Number(cost)||0, full_tank ? 1 : 0);
   res.json(db.prepare('SELECT * FROM vehicle_mileage WHERE id=?').get(r.lastInsertRowid));
 });
 
@@ -3596,6 +3745,34 @@ app.post('/api/home/maintenance/:id/done', requireAdmin, (req, res) => {
   db.prepare('UPDATE home_maintenance SET last_done=? WHERE id=?').run(localDate(), item.id);
   res.json(computeMaintenance(db.prepare('SELECT * FROM home_maintenance WHERE id=?').get(item.id)));
 });
+
+// Computes due status for a vehicle service from BOTH date and mileage
+// intervals (whichever is more urgent wins) — mirrors computePetRecord below.
+function computeVehicleServiceStatus(svc, currentMiles) {
+  let dateDays = null;
+  if (svc.next_due_date) dateDays = homeDaysUntil(svc.next_due_date);
+
+  let milesRemaining = null;
+  let next_due_miles = 0;
+  if (svc.interval_miles > 0 && svc.last_done_miles > 0) {
+    next_due_miles = svc.last_done_miles + svc.interval_miles;
+    if (currentMiles > 0) milesRemaining = next_due_miles - currentMiles;
+  }
+
+  // Roughly normalize miles-remaining to a "days-equivalent" so we can compare
+  // urgency against a date-based interval — assumes ~35 miles/day average.
+  const milesAsDays = milesRemaining === null ? null : Math.round(milesRemaining / 35);
+
+  const candidates = [dateDays, milesAsDays].filter(d => d !== null);
+  if (!candidates.length) return { ...svc, next_due_miles, miles_remaining: milesRemaining, status: 'ok', due_reason: null, days_remaining: null };
+
+  const days = Math.min(...candidates);
+  const due_reason = dateDays !== null && milesAsDays !== null
+    ? (dateDays <= milesAsDays ? 'date' : 'miles')
+    : (dateDays !== null ? 'date' : 'miles');
+  const status = days < 0 ? 'overdue' : days <= 30 ? 'due_soon' : 'ok';
+  return { ...svc, next_due_miles, miles_remaining: milesRemaining, status, due_reason, days_remaining: days };
+}
 
 // ── Pets ──────────────────────────────────────────────────────────────────────
 

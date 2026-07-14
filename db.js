@@ -499,6 +499,40 @@ if (!_wiz) {
 try { db.prepare("ALTER TABLE chore_completions ADD COLUMN photo_filename TEXT").run(); } catch(e) {}
 try { db.prepare("ALTER TABLE family_members ADD COLUMN family_role TEXT DEFAULT 'adult'").run(); } catch(e) {}
 try { db.prepare("ALTER TABLE events ADD COLUMN ics_uid TEXT").run(); } catch(e) {}
+
+// Fuel economy tracking — extends existing vehicle_mileage entries
+try { db.prepare("ALTER TABLE vehicle_mileage ADD COLUMN gallons REAL DEFAULT 0").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE vehicle_mileage ADD COLUMN cost REAL DEFAULT 0").run(); } catch(e) {}
+try { db.prepare("ALTER TABLE vehicle_mileage ADD COLUMN full_tank INTEGER DEFAULT 1").run(); } catch(e) {}
+
+// Document storage
+db.exec(`CREATE TABLE IF NOT EXISTS documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  category TEXT DEFAULT 'Other',
+  member_id INTEGER,
+  filename TEXT NOT NULL,
+  mime_type TEXT DEFAULT 'application/octet-stream',
+  created_at TEXT DEFAULT (datetime('now'))
+)`);
+
+// Redeemable rewards for chore points
+db.exec(`CREATE TABLE IF NOT EXISTS rewards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  cost_points INTEGER NOT NULL DEFAULT 10,
+  emoji TEXT DEFAULT '🎁',
+  active INTEGER DEFAULT 1,
+  created_at TEXT DEFAULT (datetime('now'))
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS reward_redemptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  member_id INTEGER NOT NULL,
+  reward_id INTEGER,
+  reward_name TEXT NOT NULL,
+  points_spent INTEGER NOT NULL,
+  redeemed_at TEXT DEFAULT (datetime('now'))
+)`);
 // Backfill ics_uid for existing events using their row id (one-time, stable after this point)
 try {
   const { randomUUID } = require('crypto');
