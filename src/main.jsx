@@ -9820,41 +9820,6 @@ function App(){
     return()=>clearInterval(id);
   },[loading,auth,kiosk,refreshMs]);
 
-  // Presence overlay — lives in App so it fires in both display and manage modes
-  const [presenceOverlay,setPresenceOverlay]=useState(null);
-  const presenceTimerRef=useRef(null);
-  const lastArrivalRef=useRef({name:null,ts:0});
-  const appMembersRef=useRef(members);
-  useEffect(()=>{appMembersRef.current=members;},[members]);
-  useEffect(()=>{
-    if(loading||(!auth&&!kiosk)) return;
-    let es;let reconnectT;
-    const connect=()=>{
-      const _sseToken=localStorage.getItem('kith_token')||'';
-      es=new EventSource(`/api/events/stream?token=${encodeURIComponent(_sseToken)}`);
-      es.addEventListener('arrival',e=>{
-        try{
-          const d=JSON.parse(e.data);
-          if(d.ts&&Date.now()-d.ts>10*60*1000) return;
-          // Debounce: ignore same-member arrival within 5s
-          const now=Date.now();
-          if((d.name||'').toLowerCase()===lastArrivalRef.current.name&&now-lastArrivalRef.current.ts<5000) return;
-          lastArrivalRef.current={name:(d.name||'').toLowerCase(),ts:now};
-          const first=(d.name||'').toLowerCase();
-          const m=appMembersRef.current.find(x=>x.name.toLowerCase()===first||x.name.toLowerCase().startsWith(first+' '));
-          const color=m?.color||'#34C759';
-          if(presenceTimerRef.current)clearTimeout(presenceTimerRef.current);
-          setPresenceOverlay({type:'arrival',name:d.name,color,ts:now});
-          presenceTimerRef.current=setTimeout(()=>setPresenceOverlay(null),120000);
-        }catch{}
-      });
-      es.onerror=()=>{es.close();clearTimeout(reconnectT);reconnectT=setTimeout(connect,4000);};
-    };
-    connect();
-    return()=>{es?.close();clearTimeout(reconnectT);};
-  },[loading,auth,kiosk]);
-  useEffect(()=>()=>{if(presenceTimerRef.current)clearTimeout(presenceTimerRef.current);},[]);
-
   // PWA install prompt
   const [installPrompt,setInstallPrompt]=useState(null);
   const [installDismissed,setInstallDismissed]=useState(()=>localStorage.getItem('kith_pwa_dismissed')==='1');
@@ -9900,17 +9865,6 @@ function App(){
   return <>{mode==='display'
     ?<DisplayMode onManage={goManage} events={events} chores={chores} setChores={setChores} meals={meals} grocery={grocery} setGrocery={setGrocery} countdowns={countdowns} photos={photos} clockFormat={clockFormat} weather={weather} nightModeStart={nightModeStart} nightModeEnd={nightModeEnd} goals={goals} notes={notes} polls={polls} rotationMs={rotationMs} wifiQrData={wifiQrData} quickActions={quickActions} members={members} packages={packages} setPackages={setPackages} messages={messages} setMessages={setMessages} appliances={appliances} consumables={consumables} maintenanceItems={maintenanceItems} pets={pets} subscriptions={subscriptions} pantry={pantry} projects={projects}/>
     :<ManageMode onDisplay={goDisplay} onLogout={handleLogout} events={events} setEvents={setEvents} chores={chores} setChores={setChores} grocery={grocery} setGrocery={setGrocery} meals={meals} setMeals={setMeals} icsSources={icsSources} setIcsSources={setIcsSources} inboxCount={inboxCount} setInboxCount={setInboxCount} countdowns={countdowns} setCountdowns={setCountdowns} members={members} setMembers={setMembers} photos={photos} setPhotos={setPhotos} clockFormat={clockFormat} setClockFormat={setClockFormat} weather={weather} nightModeStart={nightModeStart} setNightModeStart={setNightModeStart} nightModeEnd={nightModeEnd} setNightModeEnd={setNightModeEnd} setRefreshMs={setRefreshMs} parseRefreshMs={parseRefreshMs} goals={goals} setGoals={setGoals} notes={notes} setNotes={setNotes} polls={polls} setPolls={setPolls} bookmarks={bookmarks} setBookmarks={setBookmarks} quickActions={quickActions} setQuickActions={setQuickActions} setRotationMs={setRotationMs} setWifiQrData={setWifiQrData} darkMode={darkMode} onDarkMode={handleDarkMode} packages={packages} setPackages={setPackages} messages={messages} setMessages={setMessages} recipes={recipes} setRecipes={setRecipes} bills={bills} setBills={setBills} payments={payments} setPayments={setPayments} vehicles={vehicles} setVehicles={setVehicles} appliances={appliances} setAppliances={setAppliances} consumables={consumables} setConsumables={setConsumables} pets={pets} setPets={setPets} contacts={contacts} setContacts={setContacts} maintenanceItems={maintenanceItems} setMaintenanceItems={setMaintenanceItems} budget={budget} setBudget={setBudget} subscriptions={subscriptions} setSubscriptions={setSubscriptions} projects={projects} setProjects={setProjects} pantry={pantry} setPantry={setPantry} isAdmin={!!auth&&!currentMember&&!kiosk}/>}
-    {presenceOverlay&&(
-      <div style={{position:'fixed',bottom:24,right:24,zIndex:9999,display:'flex',alignItems:'center',gap:16,background:'rgba(18,18,22,0.88)',backdropFilter:'blur(18px)',WebkitBackdropFilter:'blur(18px)',borderRadius:20,padding:'16px 22px',border:`1.5px solid ${presenceOverlay.color}60`,boxShadow:`0 0 40px ${presenceOverlay.color}25,0 12px 32px rgba(0,0,0,0.5)`,animation:'presenceIn .35s cubic-bezier(.4,0,.2,1)',cursor:'pointer',maxWidth:340,overflow:'hidden'}}
-        onClick={()=>{if(presenceTimerRef.current)clearTimeout(presenceTimerRef.current);setPresenceOverlay(null);}}>
-        <div style={{width:44,height:44,borderRadius:'50%',background:`${presenceOverlay.color}25`,border:`2px solid ${presenceOverlay.color}`,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,fontSize:20}}>🏠</div>
-        <div style={{flex:1,minWidth:0}}>
-          <div style={{fontSize:17,fontWeight:800,color:'#f2f2f7',letterSpacing:'-0.01em',lineHeight:1.2}}>{presenceOverlay.name}</div>
-          <div style={{fontSize:12,color:presenceOverlay.color,fontWeight:600,marginTop:3}}>Welcome home!</div>
-          <PresenceBar key={presenceOverlay.ts} duration={120000} color={presenceOverlay.color}/>
-        </div>
-      </div>
-    )}
     {installPrompt&&!installDismissed&&mode!=='display'&&(
       <div style={{position:'fixed',bottom:0,left:0,right:0,zIndex:9998,background:isDarkNow?'#1c1c1e':'#ffffff',borderTop:`1px solid ${isDarkNow?'rgba(255,255,255,0.1)':'rgba(0,0,0,0.08)'}`,padding:'14px 20px',display:'flex',alignItems:'center',gap:14,boxShadow:'0 -4px 24px rgba(0,0,0,0.12)'}}>
         <div style={{fontSize:22,flexShrink:0}}>📲</div>

@@ -4553,40 +4553,6 @@ app.delete('/api/school/:id/classes/:cid', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-// ── Arrival/departure tracking — prevents glitch-driven and reconnection-driven false arrivals ──
-// Two failure modes:
-//   1. GPS/Homey glitch: HA reports home→not_home→home in seconds. Without departure tracking,
-//      the not_home→home transition fires a welcome notification hours after actual arrival.
-//   2. Socket reconnection: remote sends current state on reconnect; if in-memory state is stale
-//      it looks like a new arrival.
-// Fix: require a person to have been away for at least MIN_AWAY_MS before treating home→home
-// as a genuine arrival. departures are tracked across all three paths so the timing is accurate.
-const _lastArrivalAt  = {}; // entityId → ms of last fired arrival notification
-const _lastDepartureAt = {}; // entityId → ms when person was last confirmed away
-const ARRIVAL_DEDUP_MS = 30 * 60 * 1000; // suppress duplicate fires within 30 min
-const MIN_AWAY_MS      = 3  * 60 * 1000; // glitch threshold — must be away ≥3 min for arrival to count
-
-function noteDeparture(entity_id) {
-  _lastDepartureAt[entity_id] = Date.now();
-}
-
-function fireArrival(name, entity_id, source) {
-  const now = Date.now();
-  const departedAt = _lastDepartureAt[entity_id] || 0;
-  if (departedAt && now - departedAt < MIN_AWAY_MS) {
-    console.log(`[arrival] BLOCKED glitch-guard: ${entity_id} departed only ${Math.round((now-departedAt)/1000)}s ago (need ${MIN_AWAY_MS/1000}s)`);
-    return;
-  }
-  if (_lastArrivalAt[entity_id] && now - _lastArrivalAt[entity_id] < ARRIVAL_DEDUP_MS) {
-    console.log(`[arrival] BLOCKED dedup: ${entity_id} last fired ${Math.round((now-_lastArrivalAt[entity_id])/60000)}min ago (need ${ARRIVAL_DEDUP_MS/60000}min)`);
-    return;
-  }
-  console.log(`[arrival] FIRING: name=${name} entity=${entity_id} source=${source}`);
-  _lastArrivalAt[entity_id] = now;
-  sendPushToAll({ title: `${name} is home`, body: 'Welcome home!', tag: `arrival-${source}-${entity_id}` });
-  broadcastSSE('arrival', { name, entity_id, source, ts: now });
-}
-
 // ── HA WebSocket — real-time entity state changes ────────────────────────────
 let _haWs = null, _haWsRetryMs = 2000, _haWsTimer = null;
 
@@ -4649,12 +4615,6 @@ function haWsConnect() {
       const _climateId = _g('ha_climate_entity').trim();
       if (_personIds.has(entity_id)) {
         _wInvalidate('who_home');
-        if (new_state?.state === 'home' && old_state?.state !== 'home') {
-          const name = (new_state?.attributes?.friendly_name || entity_id).split(' ')[0];
-          fireArrival(name, entity_id, 'ha');
-        } else if (new_state?.state !== 'home' && old_state?.state === 'home') {
-          noteDeparture(entity_id);
-        }
       } else if (entity_id === _climateId || entity_id.startsWith('climate.')) _wInvalidate('thermostat');
       else _wInvalidate('ha_sensors');
       broadcastSSE('refresh', { source: 'ha', entity: entity_id });
@@ -4755,11 +4715,6 @@ async function homeyPoll() {
         _homeyPresence[uid] = u.present;
         changed = true;
         console.log(`[homey-poll] presence change: ${name} (${uid}) ${wasPresent} → ${u.present} firstRun=${firstRun}`);
-        if (!firstRun && u.present === true && wasPresent !== true) {
-          fireArrival(name, uid, 'homey');
-        } else if (!firstRun && u.present !== true && wasPresent === true) {
-          noteDeparture(uid);
-        }
       }
     }
     if (changed) {
@@ -4834,12 +4789,6 @@ function homeySocketConnect() {
       const nowPresent = data === true || data?.value === true || data?.present === true;
       const wasPresent = _homeyPresence[userId];
       _homeyPresence[userId] = nowPresent;
-      // Only fire if transitioning from an explicit away state (not undefined/unknown)
-      if (nowPresent && wasPresent !== true) {
-        fireArrival(_homeyNames[userId] || userId, userId, 'homey');
-      } else if (!nowPresent && wasPresent === true) {
-        noteDeparture(userId);
-      }
       _wInvalidate('who_home');
       broadcastSSE('refresh', { source: 'homey', widgets: ['who_home'] });
       return;
@@ -5255,16 +5204,6 @@ app.get('/api/export', requireAdmin, (req, res) => {
 });
 
 // ── Debug endpoints (admin-only) ──────────────────────────────────────────────
-app.post('/api/debug/test-arrival', requireAdmin, (req, res) => {
-  const name = req.body?.name || 'Test Person';
-  const entityId = req.body?.entity_id || 'debug-test';
-  // Clear dedup so the test always fires
-  delete _lastArrivalAt[entityId];
-  delete _lastDepartureAt[entityId];
-  fireArrival(name, entityId, 'debug');
-  res.json({ ok: true, name, entity_id: entityId });
-});
-
 app.get('/api/debug/homey-status', requireAdmin, (req, res) => {
   const configuredUids = g('homey_person_devices').split(',').map(s => s.trim()).filter(Boolean);
   res.json({
@@ -5274,10 +5213,6 @@ app.get('/api/debug/homey-status', requireAdmin, (req, res) => {
     configured_uids: configuredUids,
     presence_map: _homeyPresence,
     names_map: _homeyNames,
-    last_arrival_at: Object.fromEntries(Object.entries(_lastArrivalAt).map(([k,v])=>[k, new Date(v).toISOString()])),
-    last_departure_at: Object.fromEntries(Object.entries(_lastDepartureAt).map(([k,v])=>[k, new Date(v).toISOString()])),
-    dedup_ms: ARRIVAL_DEDUP_MS,
-    min_away_ms: MIN_AWAY_MS,
   });
 });
 
