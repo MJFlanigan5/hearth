@@ -4923,6 +4923,14 @@ function autoPayBill(bill) {
   broadcastSSE('bills', { action: 'reload' });
   return true;
 }
+
+// A payment/delivery confirmation email was detected but couldn't be matched to an
+// existing bill/package. Previously this only hit the server console — logged here
+// instead so it's actually visible (Inbox screen "Needs Review" section).
+function logUnmatched(type, subject, detail) {
+  db.prepare('INSERT INTO unmatched_confirmations (type,subject,detail) VALUES (?,?,?)').run(type, subject || '', detail || '');
+  broadcastSSE('unmatched', { action: 'reload' });
+}
 const DELIVERED_RE = /\b(has been delivered|was delivered|delivery complete|successfully delivered|your delivery is complete|package.*delivered|item.*delivered|delivered to your)\b/i;
 const PAID_RE = /\b(payment received|payment confirmed|payment processed|payment accepted|payment successful|we received your payment|your payment.*processed|autopay.*confirmed|auto.?payment.*processed|thank you for your payment)\b/i;
 const SHIPPING_RE = /\b(ship(?:ped|ping|ment)?|track(?:ing)?|deliver(?:y|ed|ing)?|package|dispatch(?:ed)?|arrival|in transit|out for delivery)\b/i;
@@ -4966,10 +4974,12 @@ async function pollImap() {
           const pkg = await callAiForPackage(subject, body).catch(() => null);
           const resolved = pkg?.is_shipping ? autoDeliverPackage(pkg, subject) : false;
           console.log(`[imap] delivery confirmation: ${resolved ? 'marked delivered' : 'no matching package found'}`);
+          if (!resolved) logUnmatched('delivery', subject, pkg?.is_shipping ? `${pkg.carrier || 'Unknown carrier'} ${pkg.tracking_number || ''}`.trim() : subject);
         } else if (isPaid) {
           const bill = await callAiForBill(subject, body).catch(() => null);
           const resolved = autoPayBill(bill);
           console.log(`[imap] payment confirmation: ${resolved ? `marked paid — ${bill?.payee}` : 'no matching bill found'}`);
+          if (!resolved) logUnmatched('payment', subject, bill?.payee ? `${bill.payee}${bill.amount ? ' — $' + Number(bill.amount).toFixed(2) : ''}` : subject);
         } else if (isShipping) {
           const [pkg, result] = await Promise.all([
             callAiForPackage(subject, body).catch(e => { console.error('[imap] pkg AI error:', e?.message); return null; }),
@@ -5024,6 +5034,12 @@ cron.schedule('* * * * *', () => {
   pollImap().catch(() => { _lastImapPoll = 0; }); // reset on failure so next tick retries
 });
 
+// Catch-up scan on startup: the regular poll only looks back 48h, so any extended
+// downtime (server crash, host reboot, etc.) leaves a gap the poll can't recover from.
+// scanImap30Days looks back 30 days and skips already-processed UIDs (persisted in
+// imap_processed_uids), so running it once at boot is safe and closes that gap.
+if (g('imap_enabled') === '1') setTimeout(() => scanImap30Days().catch(() => {}), 5000);
+
 async function scanImap30Days() {
   if (_scanInProgress) return;
   _scanInProgress = true;
@@ -5074,10 +5090,14 @@ async function scanImap30Days() {
     for (const { subject, isDelivered, isPaid, isShipping, isBill, isAppt, body } of batch) {
       if (isDelivered) {
         const pkg = await callAiForPackage(subject, body).catch(() => null);
-        if (pkg?.is_shipping && autoDeliverPackage(pkg, subject)) summary.packages++;
+        const resolved = pkg?.is_shipping && autoDeliverPackage(pkg, subject);
+        if (resolved) summary.packages++;
+        else logUnmatched('delivery', subject, pkg?.is_shipping ? `${pkg.carrier || 'Unknown carrier'} ${pkg.tracking_number || ''}`.trim() : subject);
       } else if (isPaid) {
         const bill = await callAiForBill(subject, body).catch(() => null);
-        if (autoPayBill(bill)) summary.bills++;
+        const resolved = autoPayBill(bill);
+        if (resolved) summary.bills++;
+        else logUnmatched('payment', subject, bill?.payee ? `${bill.payee}${bill.amount ? ' — $' + Number(bill.amount).toFixed(2) : ''}` : subject);
       } else if (isShipping) {
         const [pkg, evt] = await Promise.all([
           callAiForPackage(subject, body).catch(() => null),
@@ -5129,6 +5149,15 @@ app.post('/api/imap/scan', requireAdmin, (req, res) => {
   if (_scanInProgress) return res.json({ ok: false, status: 'already_scanning' });
   scanImap30Days();
   res.json({ ok: true, status: 'scanning' });
+});
+
+// Payment/delivery confirmation emails that couldn't be matched to an existing bill/package
+app.get('/api/unmatched', requireAuth, (req, res) => {
+  res.json(db.prepare('SELECT * FROM unmatched_confirmations WHERE dismissed=0 ORDER BY created_at DESC').all());
+});
+app.post('/api/unmatched/:id/dismiss', requireAuth, (req, res) => {
+  db.prepare('UPDATE unmatched_confirmations SET dismissed=1 WHERE id=?').run(req.params.id);
+  res.json({ ok: true });
 });
 
 app.post('/api/imap/test', requireAdmin, async (req, res) => {

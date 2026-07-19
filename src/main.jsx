@@ -3210,6 +3210,7 @@ function InboxScreen({toastAdd,events,setEvents,setInboxCount}){
   const [recent,setRecent]=useState([]);
   const [fwdAddress,setFwdAddress]=useState('');
   const [editDates,setEditDates]=useState({});
+  const [unmatched,setUnmatched]=useState([]);
 
   useEffect(()=>{
     api.get('/api/inbox').then(d=>{
@@ -3219,7 +3220,14 @@ function InboxScreen({toastAdd,events,setEvents,setInboxCount}){
       setInboxCount(d.pending.length);
     }).catch(()=>{});
     api.get('/api/settings').then(st=>{if(st.forwarding_address) setFwdAddress(st.forwarding_address);}).catch(()=>{});
+    api.get('/api/unmatched').then(d=>{if(Array.isArray(d))setUnmatched(d);}).catch(()=>{});
   },[]);
+
+  const dismissUnmatched=async id=>{
+    const r=await api.post(`/api/unmatched/${id}/dismiss`,{}).catch(()=>null);
+    if(!r||r.error){toastAdd('Failed to dismiss','red');return;}
+    setUnmatched(p=>p.filter(i=>i.id!==id));
+  };
 
   const accept=async id=>{
     const item=pending.find(i=>i.id===id);
@@ -3249,6 +3257,28 @@ function InboxScreen({toastAdd,events,setEvents,setInboxCount}){
         </div>
         {pending.length>0&&<Badge color={A.blue}>{pending.length} pending</Badge>}
       </div>
+
+      {unmatched.length>0&&(
+        <div style={{marginBottom:24}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+            <div style={{fontSize:12,fontWeight:600,color:A.label4,textTransform:'uppercase',letterSpacing:'.06em'}}>Needs Review</div>
+            <Badge color={A.amber}>{unmatched.length}</Badge>
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:8}}>
+            {unmatched.map(item=>(
+              <Card key={item.id} style={{padding:'14px 16px',display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
+                <div style={{minWidth:0}}>
+                  <div style={{fontSize:13,fontWeight:600,color:A.label1}}>
+                    {item.type==='payment'?'Payment confirmation didn\'t match any bill':'Delivery confirmation didn\'t match any package'}
+                  </div>
+                  <div style={{fontSize:12,color:A.label4,marginTop:2,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{item.detail||item.subject}</div>
+                </div>
+                <Btn variant="ghost" sm onClick={()=>dismissUnmatched(item.id)}>Dismiss</Btn>
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
 
       {pending.length===0&&(
         <Card style={{padding:'48px 24px',textAlign:'center',marginBottom:24}}>
