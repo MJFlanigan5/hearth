@@ -8843,14 +8843,14 @@ function PantryPhotoDrawer({open,onClose,setPantry,toastAdd}){
 function WishlistScreen({wishlist,setWishlist,toastAdd}){
   const isMobile=useIsMobile();
   const CATEGORIES=['Personal','Modology Equipment','Project Parts','Other'];
-  const blank={name:'',url:'',target_price:'',category:'Personal'};
+  const blank={name:'',url:'',target_price:'',category:'Personal',notes:''};
   const [drawer,setDrawer]=useState(false);
   const [editItem,setEditItem]=useState(null);
   const [form,setForm]=useState(blank);
   const [checkingId,setCheckingId]=useState(null);
 
   const openNew=()=>{setEditItem(null);setForm(blank);setDrawer(true);};
-  const openEdit=w=>{setEditItem(w);setForm({name:w.name,url:w.url||'',target_price:w.target_price!=null?String(w.target_price):'',category:w.category||'Personal'});setDrawer(true);};
+  const openEdit=w=>{setEditItem(w);setForm({name:w.name,url:w.url||'',target_price:w.target_price!=null?String(w.target_price):'',category:w.category||'Personal',notes:w.notes||''});setDrawer(true);};
   const save=async()=>{
     if(!form.name.trim()){toastAdd('Name required','red');return;}
     const body={...form,target_price:form.target_price===''?null:form.target_price};
@@ -8909,6 +8909,7 @@ function WishlistScreen({wishlist,setWishlist,toastAdd}){
                     {w.target_price!=null?` · target $${w.target_price}`:''}
                     {w.category?` · ${w.category}`:''}
                   </div>
+                  {w.notes&&<div style={{fontSize:12,color:A.label5,marginTop:2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{w.notes}</div>}
                 </div>
                 {w.url&&<button onClick={()=>checkNow(w.id)} style={{background:A.inputBg,border:`1.5px solid ${A.sep}`,borderRadius:20,padding:'5px 14px',fontSize:12,fontWeight:600,color:A.label3,cursor:'pointer',flexShrink:0}}>{checkingId===w.id?'Checking…':'Check now'}</button>}
                 <button onClick={()=>openEdit(w)} style={{background:'none',border:'none',color:A.label4,cursor:'pointer',fontSize:13,padding:'0 4px',flexShrink:0}}>Edit</button>
@@ -8933,6 +8934,9 @@ function WishlistScreen({wishlist,setWishlist,toastAdd}){
               {CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
             </select>
           </div>
+        </FormGroup>
+        <FormGroup label="Notes (optional)">
+          <div style={{padding:'12px 16px'}}><textarea value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} placeholder="Company, listed price, why you want it..." rows={3} style={{width:'100%',padding:'9px 12px',background:A.inputBg,border:`1.5px solid ${A.sep}`,borderRadius:A.rXs,fontSize:15,color:A.label1,fontFamily:'inherit',resize:'vertical',outline:'none'}}/></div>
         </FormGroup>
         <div style={{display:'flex',gap:8,marginTop:4}}>
           <Btn onClick={save} full>{editItem?'Save Changes':'Add Item'}</Btn>

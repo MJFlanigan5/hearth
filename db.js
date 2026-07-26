@@ -290,6 +290,7 @@ try { db.exec("ALTER TABLE meals ADD COLUMN lunch TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE meals ADD COLUMN dinner_recipe_id INTEGER"); } catch {}
 try { db.exec("ALTER TABLE meals ADD COLUMN breakfast_recipe_id INTEGER"); } catch {}
 try { db.exec("ALTER TABLE meals ADD COLUMN lunch_recipe_id INTEGER"); } catch {}
+try { db.exec("ALTER TABLE wishlist_items ADD COLUMN notes TEXT DEFAULT ''"); } catch {}
 // Grocery quick-add history
 db.exec(`CREATE TABLE IF NOT EXISTS grocery_history (
   name TEXT PRIMARY KEY,

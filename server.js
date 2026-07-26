@@ -4644,19 +4644,19 @@ app.get('/api/wishlist', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM wishlist_items ORDER BY created_at DESC').all());
 });
 app.post('/api/wishlist', requireAuth, (req, res) => {
-  const { name, url='', target_price=null, category='Other' } = req.body || {};
+  const { name, url='', target_price=null, category='Other', notes='' } = req.body || {};
   if (!name?.trim()) return res.status(400).json({ error: 'name required' });
-  const r = db.prepare('INSERT INTO wishlist_items (name,url,target_price,category) VALUES (?,?,?,?)')
-    .run(name.trim(), url, target_price!=null && target_price!==''?Number(target_price):null, category);
+  const r = db.prepare('INSERT INTO wishlist_items (name,url,target_price,category,notes) VALUES (?,?,?,?,?)')
+    .run(name.trim(), url, target_price!=null && target_price!==''?Number(target_price):null, category, notes);
   res.json(db.prepare('SELECT * FROM wishlist_items WHERE id=?').get(r.lastInsertRowid));
 });
 app.put('/api/wishlist/:id', requireAuth, (req, res) => {
   const w = db.prepare('SELECT * FROM wishlist_items WHERE id=?').get(Number(req.params.id));
   if (!w) return res.status(404).json({ error: 'Not found' });
-  const { name, url, target_price, category } = req.body || {};
+  const { name, url, target_price, category, notes } = req.body || {};
   const nextTarget = target_price !== undefined ? (target_price!=null && target_price!==''?Number(target_price):null) : w.target_price;
-  db.prepare('UPDATE wishlist_items SET name=?,url=?,target_price=?,category=? WHERE id=?')
-    .run((name??w.name).trim(), url??w.url, nextTarget, category??w.category, w.id);
+  db.prepare('UPDATE wishlist_items SET name=?,url=?,target_price=?,category=?,notes=? WHERE id=?')
+    .run((name??w.name).trim(), url??w.url, nextTarget, category??w.category, notes??w.notes, w.id);
   res.json(db.prepare('SELECT * FROM wishlist_items WHERE id=?').get(w.id));
 });
 app.delete('/api/wishlist/:id', requireAuth, (req, res) => {
