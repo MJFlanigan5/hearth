@@ -1502,6 +1502,19 @@ cron.schedule('0 */6 * * *', async () => {
   }
 }, { timezone: getTimezone() });
 
+cron.schedule('0 */6 * * *', async () => {
+  const items = db.prepare("SELECT * FROM wishlist_items WHERE url != '' AND target_price IS NOT NULL").all();
+  for (const w of items) {
+    try {
+      const price = await checkWishlistPrice(w.url);
+      db.prepare('UPDATE wishlist_items SET current_price=?,last_checked=? WHERE id=?').run(price, new Date().toISOString(), w.id);
+      if (price != null && price <= w.target_price) {
+        await sendPushToAll({ title: 'Kith', body: `${w.name} dropped to $${price} (target $${w.target_price})`, tag: 'wishlist-price' });
+      }
+    } catch { /* skip */ }
+  }
+}, { timezone: getTimezone() });
+
 // ── Routes: Countdowns ───────────────────────────────────────────────────────
 app.get('/api/countdowns', requireAuth, (req, res) => {
   res.json(db.prepare('SELECT * FROM countdowns ORDER BY date').all());
@@ -3305,6 +3318,23 @@ async function callAiForPantryPhotos(imagesBase64, mimeType) {
   } catch (e) { console.warn('[ai] pantry photo parse failed:', e.message); return []; }
 }
 
+async function checkWishlistPrice(url) {
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36' },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const text = stripHtml(html).slice(0, 6000);
+    const result = await callAi(
+      'Extract the current price of the main product from this webpage text. Respond with JSON only, no explanation.\nSchema: {"price": 19.99, "found": true} or {"price": null, "found": false} if no clear price is present.',
+      text
+    );
+    return (result && result.found && typeof result.price === 'number') ? result.price : null;
+  } catch { return null; }
+}
+
 // Shared AI caller — system prompt + user content, returns parsed JSON or null
 async function callAi(systemPrompt, userContent) {
   const getSetting = k => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value || '';
@@ -4596,6 +4626,42 @@ app.post('/api/pantry/add-to-grocery', requireAuth, (req, res) => {
     added++;
   }
   res.json({ added });
+});
+
+// ── Routes: Wishlist ──────────────────────────────────────────────────────────
+app.get('/api/wishlist', requireAuth, (req, res) => {
+  res.json(db.prepare('SELECT * FROM wishlist_items ORDER BY created_at DESC').all());
+});
+app.post('/api/wishlist', requireAuth, (req, res) => {
+  const { name, url='', target_price=null, category='Other' } = req.body || {};
+  if (!name?.trim()) return res.status(400).json({ error: 'name required' });
+  const r = db.prepare('INSERT INTO wishlist_items (name,url,target_price,category) VALUES (?,?,?,?)')
+    .run(name.trim(), url, target_price!=null && target_price!==''?Number(target_price):null, category);
+  res.json(db.prepare('SELECT * FROM wishlist_items WHERE id=?').get(r.lastInsertRowid));
+});
+app.put('/api/wishlist/:id', requireAuth, (req, res) => {
+  const w = db.prepare('SELECT * FROM wishlist_items WHERE id=?').get(Number(req.params.id));
+  if (!w) return res.status(404).json({ error: 'Not found' });
+  const { name, url, target_price, category } = req.body || {};
+  const nextTarget = target_price !== undefined ? (target_price!=null && target_price!==''?Number(target_price):null) : w.target_price;
+  db.prepare('UPDATE wishlist_items SET name=?,url=?,target_price=?,category=? WHERE id=?')
+    .run((name??w.name).trim(), url??w.url, nextTarget, category??w.category, w.id);
+  res.json(db.prepare('SELECT * FROM wishlist_items WHERE id=?').get(w.id));
+});
+app.delete('/api/wishlist/:id', requireAuth, (req, res) => {
+  db.prepare('DELETE FROM wishlist_items WHERE id=?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+app.post('/api/wishlist/:id/check', requireAuth, async (req, res) => {
+  const w = db.prepare('SELECT * FROM wishlist_items WHERE id=?').get(Number(req.params.id));
+  if (!w) return res.status(404).json({ error: 'Not found' });
+  if (!w.url) return res.status(400).json({ error: 'no_url' });
+  const price = await checkWishlistPrice(w.url);
+  db.prepare('UPDATE wishlist_items SET current_price=?,last_checked=? WHERE id=?').run(price, new Date().toISOString(), w.id);
+  if (price != null && w.target_price != null && price <= w.target_price) {
+    await sendPushToAll({ title: 'Kith', body: `${w.name} dropped to $${price} (target $${w.target_price})`, tag: 'wishlist-price' });
+  }
+  res.json(db.prepare('SELECT * FROM wishlist_items WHERE id=?').get(w.id));
 });
 
 // ── Routes: School ────────────────────────────────────────────────────────────

@@ -8840,6 +8840,109 @@ function PantryPhotoDrawer({open,onClose,setPantry,toastAdd}){
   );
 }
 
+function WishlistScreen({wishlist,setWishlist,toastAdd}){
+  const isMobile=useIsMobile();
+  const CATEGORIES=['Personal','Modology Equipment','Project Parts','Other'];
+  const blank={name:'',url:'',target_price:'',category:'Personal'};
+  const [drawer,setDrawer]=useState(false);
+  const [editItem,setEditItem]=useState(null);
+  const [form,setForm]=useState(blank);
+  const [checkingId,setCheckingId]=useState(null);
+
+  const openNew=()=>{setEditItem(null);setForm(blank);setDrawer(true);};
+  const openEdit=w=>{setEditItem(w);setForm({name:w.name,url:w.url||'',target_price:w.target_price!=null?String(w.target_price):'',category:w.category||'Personal'});setDrawer(true);};
+  const save=async()=>{
+    if(!form.name.trim()){toastAdd('Name required','red');return;}
+    const body={...form,target_price:form.target_price===''?null:form.target_price};
+    if(editItem){
+      const r=await api.put(`/api/wishlist/${editItem.id}`,body).catch(()=>null);
+      if(!r?.id){toastAdd('Failed to save','red');return;}
+      setWishlist(w=>w.map(x=>x.id===r.id?r:x));
+    }else{
+      const r=await api.post('/api/wishlist',body).catch(()=>null);
+      if(!r?.id){toastAdd('Failed to save','red');return;}
+      setWishlist(w=>[r,...w]);
+    }
+    setDrawer(false);setEditItem(null);
+    toastAdd(editItem?'Item updated':'Item added');
+  };
+  const del=async id=>{
+    const r=await api.del(`/api/wishlist/${id}`).catch(()=>null);
+    if(r?.error){toastAdd('Failed to remove','red');return;}
+    setWishlist(w=>w.filter(x=>x.id!==id));setDrawer(false);setEditItem(null);toastAdd('Removed','blue');
+  };
+  const checkNow=async id=>{
+    setCheckingId(id);
+    const r=await api.post(`/api/wishlist/${id}/check`,{}).catch(()=>null);
+    setCheckingId(null);
+    if(!r?.id){toastAdd('Price check failed — site may block automated requests','red');return;}
+    setWishlist(w=>w.map(x=>x.id===r.id?r:x));
+    toastAdd(r.current_price!=null?`Current price: $${r.current_price}`:'No price found on that page','blue');
+  };
+  const atTarget=w=>w.target_price!=null&&w.current_price!=null&&w.current_price<=w.target_price;
+
+  return(
+    <div>
+      <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:24}}>
+        <h1 style={{fontSize:isMobile?34:44,fontWeight:800,letterSpacing:'-.05em',lineHeight:1.05}}>Wishlist</h1>
+        <Btn onClick={openNew}>+ Add</Btn>
+      </div>
+      {(wishlist||[]).length===0?(
+        <Card style={{padding:'52px 24px',textAlign:'center'}}>
+          <div style={{fontSize:13,fontWeight:700,color:A.label5,textTransform:'uppercase',letterSpacing:'.08em',marginBottom:10}}>Nothing on the list yet</div>
+          <div style={{fontSize:15,color:A.label3,fontWeight:500}}>Track things you're watching — set a target price and get notified when it drops.</div>
+        </Card>
+      ):(
+        <Card style={{overflow:'hidden',padding:0}}>
+          {(wishlist||[]).map((w,i)=>{
+            const hit=atTarget(w);
+            return(
+              <div key={w.id} style={{display:'flex',alignItems:'center',gap:12,padding:'14px 18px',borderTop:i>0?`1px solid ${A.sep}`:'none'}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                    <span style={{fontSize:15,fontWeight:600,color:A.label1}}>{w.name}</span>
+                    {hit&&<span style={{fontSize:11,fontWeight:700,color:A.green,background:A.greenFill,padding:'2px 8px',borderRadius:A.rPill}}>At target</span>}
+                  </div>
+                  <div style={{fontSize:12,color:A.label4,marginTop:2}}>
+                    {w.current_price!=null?`$${w.current_price}`:'No price yet'}
+                    {w.target_price!=null?` · target $${w.target_price}`:''}
+                    {w.category?` · ${w.category}`:''}
+                  </div>
+                </div>
+                {w.url&&<button onClick={()=>checkNow(w.id)} style={{background:A.inputBg,border:`1.5px solid ${A.sep}`,borderRadius:20,padding:'5px 14px',fontSize:12,fontWeight:600,color:A.label3,cursor:'pointer',flexShrink:0}}>{checkingId===w.id?'Checking…':'Check now'}</button>}
+                <button onClick={()=>openEdit(w)} style={{background:'none',border:'none',color:A.label4,cursor:'pointer',fontSize:13,padding:'0 4px',flexShrink:0}}>Edit</button>
+              </div>
+            );
+          })}
+        </Card>
+      )}
+      <Drawer open={drawer} onClose={()=>{setDrawer(false);setEditItem(null);}} title={editItem?'Edit Item':'Add Item'}>
+        <FormGroup label="Name">
+          <div style={{padding:'12px 16px'}}><Inp value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="What are you watching?"/></div>
+        </FormGroup>
+        <FormGroup label="URL (optional)" footer="Needed for automatic price checks. Amazon links won't work here — use the Amazon Price Tracker in Home Assistant for those.">
+          <div style={{padding:'12px 16px'}}><Inp value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} placeholder="https://..."/></div>
+        </FormGroup>
+        <FormGroup label="Target price (optional)" footer="Get notified when the price drops to or below this.">
+          <div style={{padding:'12px 16px'}}><Inp type="number" value={form.target_price} onChange={e=>setForm(f=>({...f,target_price:e.target.value}))} placeholder="0.00"/></div>
+        </FormGroup>
+        <FormGroup label="Category">
+          <div style={{padding:'12px 16px'}}>
+            <select value={form.category} onChange={e=>setForm(f=>({...f,category:e.target.value}))} style={{width:'100%',padding:'10px 12px',borderRadius:A.rXs,border:`1px solid ${A.sep}`,background:A.inputBg,fontSize:15,color:A.label1}}>
+              {CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+        </FormGroup>
+        <div style={{display:'flex',gap:8,marginTop:4}}>
+          <Btn onClick={save} full>{editItem?'Save Changes':'Add Item'}</Btn>
+          {editItem&&<Btn variant="ghost" onClick={()=>del(editItem.id)} full style={{color:A.red}}>Delete</Btn>}
+        </div>
+        {!editItem&&<Btn variant="ghost" onClick={()=>setDrawer(false)} full style={{marginTop:8}}>Cancel</Btn>}
+      </Drawer>
+    </div>
+  );
+}
+
 function PantryScreen({pantry,setPantry,grocery,setGrocery,toastAdd}){
   const isMobile=useIsMobile();
   const LOCATIONS=['Fridge','Freezer','Pantry','Cabinet','Other'];
@@ -9213,7 +9316,7 @@ function SchoolScreen({members=[],toastAdd}){
   );
 }
 
-function ManageMode({onDisplay,onLogout,events,setEvents,chores,setChores,grocery,setGrocery,meals,setMeals,icsSources,setIcsSources,inboxCount,setInboxCount,countdowns,setCountdowns,members,setMembers,photos,setPhotos,clockFormat,setClockFormat,weather,nightModeStart,setNightModeStart,nightModeEnd,setNightModeEnd,setRefreshMs,parseRefreshMs,goals,setGoals,notes,setNotes,polls,setPolls,bookmarks,setBookmarks,quickActions,setQuickActions,setRotationMs,setWifiQrData,darkMode,onDarkMode,packages,setPackages,messages,setMessages,recipes,setRecipes,bills,setBills,payments,setPayments,vehicles,setVehicles,appliances,setAppliances,consumables,setConsumables,pets,setPets,contacts,setContacts,maintenanceItems,setMaintenanceItems,budget,setBudget,subscriptions,setSubscriptions,projects,setProjects,pantry,setPantry,isAdmin=false}){
+function ManageMode({onDisplay,onLogout,events,setEvents,chores,setChores,grocery,setGrocery,meals,setMeals,icsSources,setIcsSources,inboxCount,setInboxCount,countdowns,setCountdowns,members,setMembers,photos,setPhotos,clockFormat,setClockFormat,weather,nightModeStart,setNightModeStart,nightModeEnd,setNightModeEnd,setRefreshMs,parseRefreshMs,goals,setGoals,notes,setNotes,polls,setPolls,bookmarks,setBookmarks,quickActions,setQuickActions,setRotationMs,setWifiQrData,darkMode,onDarkMode,packages,setPackages,messages,setMessages,recipes,setRecipes,bills,setBills,payments,setPayments,vehicles,setVehicles,appliances,setAppliances,consumables,setConsumables,pets,setPets,contacts,setContacts,maintenanceItems,setMaintenanceItems,budget,setBudget,subscriptions,setSubscriptions,projects,setProjects,pantry,setPantry,wishlist,setWishlist,isAdmin=false}){
   const isMobile=useIsMobile();
   const [screen,setScreen]=useState('dashboard');
   const {toasts,add:toastAdd}=useToast();
@@ -9265,6 +9368,7 @@ function ManageMode({onDisplay,onLogout,events,setEvents,chores,setChores,grocer
     {id:'chores',label:'Chores',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><rect x="2" y="1.5" width="13" height="14" rx="2" stroke="currentColor" strokeWidth="1.5"/><path d="M5.5 7l2 2 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><path d="M5.5 11h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>},
     {id:'grocery',label:'Grocery',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><path d="M2 4h13l-1.5 8H3.5L2 4z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/><path d="M6 4l.5-2.5h4L11 4" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg>},
     {id:'pantry',label:'Pantry',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><rect x="3" y="3" width="11" height="12" rx="2" stroke="currentColor" strokeWidth="1.5"/><path d="M3 7h11" stroke="currentColor" strokeWidth="1.5"/><path d="M6 1.5v2M11 1.5v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>},
+    {id:'wishlist',label:'Wishlist',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><path d="M8.5 14.5s-6-3.6-6-7.9A3.6 3.6 0 018.5 4.3 3.6 3.6 0 0114.5 6.6c0 4.3-6 7.9-6 7.9z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg>},
     {id:'countdowns',label:'Countdowns',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><circle cx="8.5" cy="9" r="6.5" stroke="currentColor" strokeWidth="1.5"/><path d="M8.5 5.5V9l2.5 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><path d="M6 1.5h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>},
     {id:'family',label:'Family',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><circle cx="6" cy="5" r="2.5" stroke="currentColor" strokeWidth="1.5"/><circle cx="12" cy="5" r="2" stroke="currentColor" strokeWidth="1.5"/><path d="M1 14c0-2.76 2.24-5 5-5s5 2.24 5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/><path d="M12 9c1.66 0 3 1.34 3 3v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>},
     {id:'school',label:'School',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><path d="M1.5 6.5L8.5 3l7 3.5-7 3.5-7-3.5z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/><path d="M4 8v4c0 1 2 2 4.5 2s4.5-1 4.5-2V8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>},
@@ -9297,6 +9401,7 @@ function ManageMode({onDisplay,onLogout,events,setEvents,chores,setChores,grocer
     chores:     <ChoresScreen chores={chores} setChores={setChores} goals={goals} members={members} toastAdd={toastAdd}/>,
     grocery:    <GroceryScreen grocery={grocery} setGrocery={setGrocery} meals={meals} setMeals={setMeals} recipes={recipes} toastAdd={toastAdd}/>,
     pantry:     <PantryScreen pantry={pantry} setPantry={setPantry} grocery={grocery} setGrocery={setGrocery} toastAdd={toastAdd}/>,
+    wishlist:   <WishlistScreen wishlist={wishlist} setWishlist={setWishlist} toastAdd={toastAdd}/>,
     countdowns: <CountdownsScreen countdowns={countdowns} setCountdowns={setCountdowns} toastAdd={toastAdd}/>,
     family:     <FamilyScreen members={members} setMembers={setMembers} toastAdd={toastAdd}/>,
     school:     <SchoolScreen members={members} toastAdd={toastAdd}/>,
@@ -9836,6 +9941,7 @@ function App(){
   const [subscriptions,setSubscriptions]=useState([]);
   const [projects,setProjects]=useState([]);
   const [pantry,setPantry]=useState([]);
+  const [wishlist,setWishlist]=useState([]);
   const [quickActions,setQuickActions]=useState([]);
   const [photos,setPhotos]=useState([]);
   const [clockFormat,setClockFormat]=useState('12h');
@@ -9921,7 +10027,8 @@ function App(){
       api.get('/api/subscriptions'),
       api.get('/api/projects'),
       api.get('/api/pantry'),
-    ]).then(([ev,ch,gr,ml,ics,inb,cd,mb,ph,st,gl,nt,pl,qa,bm,pk,ms,rc,bl,veh,appl,cons,maint,petsData,contsData,bdg,subs,proj,pntr])=>{
+      api.get('/api/wishlist'),
+    ]).then(([ev,ch,gr,ml,ics,inb,cd,mb,ph,st,gl,nt,pl,qa,bm,pk,ms,rc,bl,veh,appl,cons,maint,petsData,contsData,bdg,subs,proj,pntr,wl])=>{
       if(ev.status==='fulfilled'&&Array.isArray(ev.value)) setEvents(ev.value);
       if(ch.status==='fulfilled'&&Array.isArray(ch.value)) setChores(ch.value);
       if(gr.status==='fulfilled'&&Array.isArray(gr.value)) setGrocery(gr.value);
@@ -9950,6 +10057,7 @@ function App(){
       if(subs.status==='fulfilled'&&Array.isArray(subs.value)) setSubscriptions(subs.value);
       if(proj.status==='fulfilled'&&Array.isArray(proj.value)) setProjects(proj.value);
       if(pntr.status==='fulfilled'&&Array.isArray(pntr.value)) setPantry(pntr.value);
+      if(wl.status==='fulfilled'&&Array.isArray(wl.value)) setWishlist(wl.value);
       if(st.status==='fulfilled'){
         const s=st.value;
         if(s.clock_format) setClockFormat(s.clock_format);
@@ -10041,7 +10149,7 @@ function App(){
   const isDarkNow=darkMode==='Dark'||(darkMode==='System'&&sysDark);
   return <>{mode==='display'
     ?<DisplayMode onManage={goManage} events={events} chores={chores} setChores={setChores} meals={meals} grocery={grocery} setGrocery={setGrocery} countdowns={countdowns} photos={photos} clockFormat={clockFormat} weather={weather} nightModeStart={nightModeStart} nightModeEnd={nightModeEnd} goals={goals} notes={notes} polls={polls} rotationMs={rotationMs} wifiQrData={wifiQrData} quickActions={quickActions} members={members} packages={packages} setPackages={setPackages} messages={messages} setMessages={setMessages} appliances={appliances} consumables={consumables} maintenanceItems={maintenanceItems} pets={pets} subscriptions={subscriptions} pantry={pantry} projects={projects}/>
-    :<ManageMode onDisplay={goDisplay} onLogout={handleLogout} events={events} setEvents={setEvents} chores={chores} setChores={setChores} grocery={grocery} setGrocery={setGrocery} meals={meals} setMeals={setMeals} icsSources={icsSources} setIcsSources={setIcsSources} inboxCount={inboxCount} setInboxCount={setInboxCount} countdowns={countdowns} setCountdowns={setCountdowns} members={members} setMembers={setMembers} photos={photos} setPhotos={setPhotos} clockFormat={clockFormat} setClockFormat={setClockFormat} weather={weather} nightModeStart={nightModeStart} setNightModeStart={setNightModeStart} nightModeEnd={nightModeEnd} setNightModeEnd={setNightModeEnd} setRefreshMs={setRefreshMs} parseRefreshMs={parseRefreshMs} goals={goals} setGoals={setGoals} notes={notes} setNotes={setNotes} polls={polls} setPolls={setPolls} bookmarks={bookmarks} setBookmarks={setBookmarks} quickActions={quickActions} setQuickActions={setQuickActions} setRotationMs={setRotationMs} setWifiQrData={setWifiQrData} darkMode={darkMode} onDarkMode={handleDarkMode} packages={packages} setPackages={setPackages} messages={messages} setMessages={setMessages} recipes={recipes} setRecipes={setRecipes} bills={bills} setBills={setBills} payments={payments} setPayments={setPayments} vehicles={vehicles} setVehicles={setVehicles} appliances={appliances} setAppliances={setAppliances} consumables={consumables} setConsumables={setConsumables} pets={pets} setPets={setPets} contacts={contacts} setContacts={setContacts} maintenanceItems={maintenanceItems} setMaintenanceItems={setMaintenanceItems} budget={budget} setBudget={setBudget} subscriptions={subscriptions} setSubscriptions={setSubscriptions} projects={projects} setProjects={setProjects} pantry={pantry} setPantry={setPantry} isAdmin={!!auth&&!currentMember&&!kiosk}/>}
+    :<ManageMode onDisplay={goDisplay} onLogout={handleLogout} events={events} setEvents={setEvents} chores={chores} setChores={setChores} grocery={grocery} setGrocery={setGrocery} meals={meals} setMeals={setMeals} icsSources={icsSources} setIcsSources={setIcsSources} inboxCount={inboxCount} setInboxCount={setInboxCount} countdowns={countdowns} setCountdowns={setCountdowns} members={members} setMembers={setMembers} photos={photos} setPhotos={setPhotos} clockFormat={clockFormat} setClockFormat={setClockFormat} weather={weather} nightModeStart={nightModeStart} setNightModeStart={setNightModeStart} nightModeEnd={nightModeEnd} setNightModeEnd={setNightModeEnd} setRefreshMs={setRefreshMs} parseRefreshMs={parseRefreshMs} goals={goals} setGoals={setGoals} notes={notes} setNotes={setNotes} polls={polls} setPolls={setPolls} bookmarks={bookmarks} setBookmarks={setBookmarks} quickActions={quickActions} setQuickActions={setQuickActions} setRotationMs={setRotationMs} setWifiQrData={setWifiQrData} darkMode={darkMode} onDarkMode={handleDarkMode} packages={packages} setPackages={setPackages} messages={messages} setMessages={setMessages} recipes={recipes} setRecipes={setRecipes} bills={bills} setBills={setBills} payments={payments} setPayments={setPayments} vehicles={vehicles} setVehicles={setVehicles} appliances={appliances} setAppliances={setAppliances} consumables={consumables} setConsumables={setConsumables} pets={pets} setPets={setPets} contacts={contacts} setContacts={setContacts} maintenanceItems={maintenanceItems} setMaintenanceItems={setMaintenanceItems} budget={budget} setBudget={setBudget} subscriptions={subscriptions} setSubscriptions={setSubscriptions} projects={projects} setProjects={setProjects} pantry={pantry} setPantry={setPantry} wishlist={wishlist} setWishlist={setWishlist} isAdmin={!!auth&&!currentMember&&!kiosk}/>}
     {installPrompt&&!installDismissed&&mode!=='display'&&(
       <div style={{position:'fixed',bottom:0,left:0,right:0,zIndex:9998,background:isDarkNow?'#1c1c1e':'#ffffff',borderTop:`1px solid ${isDarkNow?'rgba(255,255,255,0.1)':'rgba(0,0,0,0.08)'}`,padding:'14px 20px',display:'flex',alignItems:'center',gap:14,boxShadow:'0 -4px 24px rgba(0,0,0,0.12)'}}>
         <div style={{fontSize:22,flexShrink:0}}>📲</div>

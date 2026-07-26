@@ -455,6 +455,16 @@ db.exec(`CREATE TABLE IF NOT EXISTS pantry_items (
   category TEXT DEFAULT 'Other',
   created_at TEXT DEFAULT (datetime('now'))
 )`)
+db.exec(`CREATE TABLE IF NOT EXISTS wishlist_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  url TEXT DEFAULT '',
+  target_price REAL,
+  current_price REAL,
+  category TEXT DEFAULT 'Other',
+  last_checked TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now'))
+)`)
 db.exec(`CREATE TABLE IF NOT EXISTS school_members (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   member_id INTEGER,
