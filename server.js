@@ -306,6 +306,22 @@ async function sendPushToAll(payload) {
   }
 }
 
+async function notifyHaMobile(message, title = 'Kith') {
+  try {
+    const haUrl = (gs('ha_url') || '').replace(/\/$/, '');
+    const haToken = gs('ha_token') || '';
+    if (!haUrl || !haToken) return;
+    await fetch(`${haUrl}/api/services/notify/mobile_app_iphone`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${haToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, message }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (e) {
+    console.error('notifyHaMobile failed:', e.message);
+  }
+}
+
 // ── Weather ───────────────────────────────────────────────────────────────────
 let _weatherCache = null;
 let _weatherCacheAt = 0;
@@ -4673,6 +4689,37 @@ app.post('/api/wishlist/:id/check', requireAuth, async (req, res) => {
     await sendPushToAll({ title: 'Kith', body: `${w.name} dropped to $${price} (target $${w.target_price})`, tag: 'wishlist-price' });
   }
   res.json({ ...db.prepare('SELECT * FROM wishlist_items WHERE id=?').get(w.id), check_failed: price == null });
+});
+
+// ── Routes: Claude Inbox ──────────────────────────────────────────────────────
+app.get('/api/claude-inbox', requireAdmin, (req, res) => {
+  res.json(db.prepare('SELECT * FROM claude_inbox ORDER BY created_at ASC').all());
+});
+app.post('/api/claude-inbox', requireAdmin, (req, res) => {
+  const { body } = req.body || {};
+  if (!body?.trim()) return res.status(400).json({ error: 'body required' });
+  const r = db.prepare("INSERT INTO claude_inbox (sender,body) VALUES ('mike',?)").run(body.trim());
+  res.json(db.prepare('SELECT * FROM claude_inbox WHERE id=?').get(r.lastInsertRowid));
+});
+app.post('/api/claude-inbox/reply', requireAdmin, async (req, res) => {
+  const { body } = req.body || {};
+  if (!body?.trim()) return res.status(400).json({ error: 'body required' });
+  const r = db.prepare("INSERT INTO claude_inbox (sender,body,read) VALUES ('claude',?,1)").run(body.trim());
+  await notifyHaMobile(body.trim(), 'Claude replied');
+  res.json(db.prepare('SELECT * FROM claude_inbox WHERE id=?').get(r.lastInsertRowid));
+});
+app.put('/api/claude-inbox/mark-all-read', requireAdmin, (req, res) => {
+  db.prepare("UPDATE claude_inbox SET read=1 WHERE sender='mike' AND read=0").run();
+  res.json({ ok: true });
+});
+app.put('/api/claude-inbox/:id/read', requireAdmin, (req, res) => {
+  const info = db.prepare('UPDATE claude_inbox SET read=1 WHERE id=?').run(Number(req.params.id));
+  if (!info.changes) return res.status(404).json({ error: 'Not found' });
+  res.json({ ok: true });
+});
+app.delete('/api/claude-inbox/:id', requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM claude_inbox WHERE id=?').run(Number(req.params.id));
+  res.json({ ok: true });
 });
 
 // ── Routes: School ────────────────────────────────────────────────────────────

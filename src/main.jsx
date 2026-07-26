@@ -8971,6 +8971,62 @@ function WishlistScreen({wishlist,setWishlist,toastAdd}){
   );
 }
 
+function ClaudeInboxScreen({claudeInbox,setClaudeInbox,toastAdd}){
+  const isMobile=useIsMobile();
+  const [text,setText]=useState('');
+  const bottomRef=useRef(null);
+
+  useEffect(()=>{bottomRef.current?.scrollIntoView({block:'end'});},[claudeInbox.length]);
+
+  const send=async()=>{
+    if(!text.trim())return;
+    const body=text.trim();
+    setText('');
+    const r=await api.post('/api/claude-inbox',{body}).catch(()=>null);
+    if(!r?.id){toastAdd(r?.error||'Failed to send','red');return;}
+    setClaudeInbox(p=>[...p,r]);
+  };
+  const del=async id=>{
+    const r=await api.del(`/api/claude-inbox/${id}`).catch(()=>null);
+    if(r?.error){toastAdd('Failed to delete','red');return;}
+    setClaudeInbox(p=>p.filter(m=>m.id!==id));
+  };
+  const onKeyDown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}};
+  const fmtTime=ts=>new Date(ts.replace(' ','T')+'Z').toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+
+  return(
+    <div>
+      <div style={{marginBottom:24}}>
+        <h1 style={{fontSize:isMobile?34:44,fontWeight:800,letterSpacing:'-.05em',lineHeight:1.05}}>Claude Inbox</h1>
+        <p style={{color:A.label4,fontSize:15,marginTop:6}}>Leave a note for Claude to pick up next session — replies push a notification to your phone.</p>
+      </div>
+      <Card style={{padding:16,display:'flex',flexDirection:'column',gap:10,minHeight:300,maxHeight:'60vh',overflowY:'auto',marginBottom:16}}>
+        {(claudeInbox||[]).length===0?(
+          <div style={{margin:'auto',textAlign:'center',fontSize:14,color:A.label4,padding:'24px 0'}}>No messages yet — leave Claude a note below.</div>
+        ):claudeInbox.map(m=>{
+          const mine=m.sender==='mike';
+          return(
+            <div key={m.id} style={{display:'flex',flexDirection:'column',alignItems:mine?'flex-end':'flex-start'}}>
+              <div style={{maxWidth:'75%',padding:'10px 14px',borderRadius:16,background:mine?A.blue:A.inputBg,color:mine?'#fff':A.label1,fontSize:15,lineHeight:1.4,whiteSpace:'pre-wrap'}}>
+                {m.body}
+              </div>
+              <div style={{display:'flex',gap:8,alignItems:'center',marginTop:3}}>
+                <span style={{fontSize:11,color:A.label5}}>{mine?'You':'Claude'} · {fmtTime(m.created_at)}</span>
+                <button onClick={()=>del(m.id)} style={{background:'none',border:'none',color:A.label5,fontSize:11,cursor:'pointer',padding:0}}>Delete</button>
+              </div>
+            </div>
+          );
+        })}
+        <div ref={bottomRef}/>
+      </Card>
+      <div style={{display:'flex',gap:8}}>
+        <textarea value={text} onChange={e=>setText(e.target.value)} onKeyDown={onKeyDown} rows={2} placeholder="Message Claude..." style={{flex:1,padding:'10px 14px',borderRadius:A.rXs,border:`1px solid ${A.sep}`,background:A.inputBg,fontSize:15,color:A.label1,resize:'vertical',outline:'none',lineHeight:1.4,fontFamily:'inherit'}}/>
+        <Btn onClick={send}>Send</Btn>
+      </div>
+    </div>
+  );
+}
+
 function PantryScreen({pantry,setPantry,grocery,setGrocery,toastAdd}){
   const isMobile=useIsMobile();
   const LOCATIONS=['Fridge','Freezer','Pantry','Cabinet','Other'];
@@ -9344,7 +9400,7 @@ function SchoolScreen({members=[],toastAdd}){
   );
 }
 
-function ManageMode({onDisplay,onLogout,events,setEvents,chores,setChores,grocery,setGrocery,meals,setMeals,icsSources,setIcsSources,inboxCount,setInboxCount,countdowns,setCountdowns,members,setMembers,photos,setPhotos,clockFormat,setClockFormat,weather,nightModeStart,setNightModeStart,nightModeEnd,setNightModeEnd,setRefreshMs,parseRefreshMs,goals,setGoals,notes,setNotes,polls,setPolls,bookmarks,setBookmarks,quickActions,setQuickActions,setRotationMs,setWifiQrData,darkMode,onDarkMode,packages,setPackages,messages,setMessages,recipes,setRecipes,bills,setBills,payments,setPayments,vehicles,setVehicles,appliances,setAppliances,consumables,setConsumables,pets,setPets,contacts,setContacts,maintenanceItems,setMaintenanceItems,budget,setBudget,subscriptions,setSubscriptions,projects,setProjects,pantry,setPantry,wishlist,setWishlist,isAdmin=false}){
+function ManageMode({onDisplay,onLogout,events,setEvents,chores,setChores,grocery,setGrocery,meals,setMeals,icsSources,setIcsSources,inboxCount,setInboxCount,countdowns,setCountdowns,members,setMembers,photos,setPhotos,clockFormat,setClockFormat,weather,nightModeStart,setNightModeStart,nightModeEnd,setNightModeEnd,setRefreshMs,parseRefreshMs,goals,setGoals,notes,setNotes,polls,setPolls,bookmarks,setBookmarks,quickActions,setQuickActions,setRotationMs,setWifiQrData,darkMode,onDarkMode,packages,setPackages,messages,setMessages,recipes,setRecipes,bills,setBills,payments,setPayments,vehicles,setVehicles,appliances,setAppliances,consumables,setConsumables,pets,setPets,contacts,setContacts,maintenanceItems,setMaintenanceItems,budget,setBudget,subscriptions,setSubscriptions,projects,setProjects,pantry,setPantry,wishlist,setWishlist,claudeInbox,setClaudeInbox,isAdmin=false}){
   const isMobile=useIsMobile();
   const [screen,setScreen]=useState('dashboard');
   const {toasts,add:toastAdd}=useToast();
@@ -9397,6 +9453,7 @@ function ManageMode({onDisplay,onLogout,events,setEvents,chores,setChores,grocer
     {id:'grocery',label:'Grocery',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><path d="M2 4h13l-1.5 8H3.5L2 4z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/><path d="M6 4l.5-2.5h4L11 4" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg>},
     {id:'pantry',label:'Pantry',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><rect x="3" y="3" width="11" height="12" rx="2" stroke="currentColor" strokeWidth="1.5"/><path d="M3 7h11" stroke="currentColor" strokeWidth="1.5"/><path d="M6 1.5v2M11 1.5v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>},
     {id:'wishlist',label:'Wishlist',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><path d="M8.5 14.5s-6-3.6-6-7.9A3.6 3.6 0 018.5 4.3 3.6 3.6 0 0114.5 6.6c0 4.3-6 7.9-6 7.9z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg>},
+    {id:'claudeInbox',label:'Claude Inbox',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><rect x="2" y="2.5" width="13" height="12" rx="2" stroke="currentColor" strokeWidth="1.5"/><path d="M5 6.5h7M5 9.5h4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>},
     {id:'countdowns',label:'Countdowns',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><circle cx="8.5" cy="9" r="6.5" stroke="currentColor" strokeWidth="1.5"/><path d="M8.5 5.5V9l2.5 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><path d="M6 1.5h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>},
     {id:'family',label:'Family',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><circle cx="6" cy="5" r="2.5" stroke="currentColor" strokeWidth="1.5"/><circle cx="12" cy="5" r="2" stroke="currentColor" strokeWidth="1.5"/><path d="M1 14c0-2.76 2.24-5 5-5s5 2.24 5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/><path d="M12 9c1.66 0 3 1.34 3 3v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>},
     {id:'school',label:'School',icon:<svg width="17" height="17" viewBox="0 0 17 17" fill="none"><path d="M1.5 6.5L8.5 3l7 3.5-7 3.5-7-3.5z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/><path d="M4 8v4c0 1 2 2 4.5 2s4.5-1 4.5-2V8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>},
@@ -9430,6 +9487,7 @@ function ManageMode({onDisplay,onLogout,events,setEvents,chores,setChores,grocer
     grocery:    <GroceryScreen grocery={grocery} setGrocery={setGrocery} meals={meals} setMeals={setMeals} recipes={recipes} toastAdd={toastAdd}/>,
     pantry:     <PantryScreen pantry={pantry} setPantry={setPantry} grocery={grocery} setGrocery={setGrocery} toastAdd={toastAdd}/>,
     wishlist:   <WishlistScreen wishlist={wishlist} setWishlist={setWishlist} toastAdd={toastAdd}/>,
+    claudeInbox: <ClaudeInboxScreen claudeInbox={claudeInbox} setClaudeInbox={setClaudeInbox} toastAdd={toastAdd}/>,
     countdowns: <CountdownsScreen countdowns={countdowns} setCountdowns={setCountdowns} toastAdd={toastAdd}/>,
     family:     <FamilyScreen members={members} setMembers={setMembers} toastAdd={toastAdd}/>,
     school:     <SchoolScreen members={members} toastAdd={toastAdd}/>,
@@ -9970,6 +10028,7 @@ function App(){
   const [projects,setProjects]=useState([]);
   const [pantry,setPantry]=useState([]);
   const [wishlist,setWishlist]=useState([]);
+  const [claudeInbox,setClaudeInbox]=useState([]);
   const [quickActions,setQuickActions]=useState([]);
   const [photos,setPhotos]=useState([]);
   const [clockFormat,setClockFormat]=useState('12h');
@@ -10056,7 +10115,8 @@ function App(){
       api.get('/api/projects'),
       api.get('/api/pantry'),
       api.get('/api/wishlist'),
-    ]).then(([ev,ch,gr,ml,ics,inb,cd,mb,ph,st,gl,nt,pl,qa,bm,pk,ms,rc,bl,veh,appl,cons,maint,petsData,contsData,bdg,subs,proj,pntr,wl])=>{
+      api.get('/api/claude-inbox'),
+    ]).then(([ev,ch,gr,ml,ics,inb,cd,mb,ph,st,gl,nt,pl,qa,bm,pk,ms,rc,bl,veh,appl,cons,maint,petsData,contsData,bdg,subs,proj,pntr,wl,ci])=>{
       if(ev.status==='fulfilled'&&Array.isArray(ev.value)) setEvents(ev.value);
       if(ch.status==='fulfilled'&&Array.isArray(ch.value)) setChores(ch.value);
       if(gr.status==='fulfilled'&&Array.isArray(gr.value)) setGrocery(gr.value);
@@ -10086,6 +10146,7 @@ function App(){
       if(proj.status==='fulfilled'&&Array.isArray(proj.value)) setProjects(proj.value);
       if(pntr.status==='fulfilled'&&Array.isArray(pntr.value)) setPantry(pntr.value);
       if(wl.status==='fulfilled'&&Array.isArray(wl.value)) setWishlist(wl.value);
+      if(ci.status==='fulfilled'&&Array.isArray(ci.value)) setClaudeInbox(ci.value);
       if(st.status==='fulfilled'){
         const s=st.value;
         if(s.clock_format) setClockFormat(s.clock_format);
@@ -10177,7 +10238,7 @@ function App(){
   const isDarkNow=darkMode==='Dark'||(darkMode==='System'&&sysDark);
   return <>{mode==='display'
     ?<DisplayMode onManage={goManage} events={events} chores={chores} setChores={setChores} meals={meals} grocery={grocery} setGrocery={setGrocery} countdowns={countdowns} photos={photos} clockFormat={clockFormat} weather={weather} nightModeStart={nightModeStart} nightModeEnd={nightModeEnd} goals={goals} notes={notes} polls={polls} rotationMs={rotationMs} wifiQrData={wifiQrData} quickActions={quickActions} members={members} packages={packages} setPackages={setPackages} messages={messages} setMessages={setMessages} appliances={appliances} consumables={consumables} maintenanceItems={maintenanceItems} pets={pets} subscriptions={subscriptions} pantry={pantry} projects={projects}/>
-    :<ManageMode onDisplay={goDisplay} onLogout={handleLogout} events={events} setEvents={setEvents} chores={chores} setChores={setChores} grocery={grocery} setGrocery={setGrocery} meals={meals} setMeals={setMeals} icsSources={icsSources} setIcsSources={setIcsSources} inboxCount={inboxCount} setInboxCount={setInboxCount} countdowns={countdowns} setCountdowns={setCountdowns} members={members} setMembers={setMembers} photos={photos} setPhotos={setPhotos} clockFormat={clockFormat} setClockFormat={setClockFormat} weather={weather} nightModeStart={nightModeStart} setNightModeStart={setNightModeStart} nightModeEnd={nightModeEnd} setNightModeEnd={setNightModeEnd} setRefreshMs={setRefreshMs} parseRefreshMs={parseRefreshMs} goals={goals} setGoals={setGoals} notes={notes} setNotes={setNotes} polls={polls} setPolls={setPolls} bookmarks={bookmarks} setBookmarks={setBookmarks} quickActions={quickActions} setQuickActions={setQuickActions} setRotationMs={setRotationMs} setWifiQrData={setWifiQrData} darkMode={darkMode} onDarkMode={handleDarkMode} packages={packages} setPackages={setPackages} messages={messages} setMessages={setMessages} recipes={recipes} setRecipes={setRecipes} bills={bills} setBills={setBills} payments={payments} setPayments={setPayments} vehicles={vehicles} setVehicles={setVehicles} appliances={appliances} setAppliances={setAppliances} consumables={consumables} setConsumables={setConsumables} pets={pets} setPets={setPets} contacts={contacts} setContacts={setContacts} maintenanceItems={maintenanceItems} setMaintenanceItems={setMaintenanceItems} budget={budget} setBudget={setBudget} subscriptions={subscriptions} setSubscriptions={setSubscriptions} projects={projects} setProjects={setProjects} pantry={pantry} setPantry={setPantry} wishlist={wishlist} setWishlist={setWishlist} isAdmin={!!auth&&!currentMember&&!kiosk}/>}
+    :<ManageMode onDisplay={goDisplay} onLogout={handleLogout} events={events} setEvents={setEvents} chores={chores} setChores={setChores} grocery={grocery} setGrocery={setGrocery} meals={meals} setMeals={setMeals} icsSources={icsSources} setIcsSources={setIcsSources} inboxCount={inboxCount} setInboxCount={setInboxCount} countdowns={countdowns} setCountdowns={setCountdowns} members={members} setMembers={setMembers} photos={photos} setPhotos={setPhotos} clockFormat={clockFormat} setClockFormat={setClockFormat} weather={weather} nightModeStart={nightModeStart} setNightModeStart={setNightModeStart} nightModeEnd={nightModeEnd} setNightModeEnd={setNightModeEnd} setRefreshMs={setRefreshMs} parseRefreshMs={parseRefreshMs} goals={goals} setGoals={setGoals} notes={notes} setNotes={setNotes} polls={polls} setPolls={setPolls} bookmarks={bookmarks} setBookmarks={setBookmarks} quickActions={quickActions} setQuickActions={setQuickActions} setRotationMs={setRotationMs} setWifiQrData={setWifiQrData} darkMode={darkMode} onDarkMode={handleDarkMode} packages={packages} setPackages={setPackages} messages={messages} setMessages={setMessages} recipes={recipes} setRecipes={setRecipes} bills={bills} setBills={setBills} payments={payments} setPayments={setPayments} vehicles={vehicles} setVehicles={setVehicles} appliances={appliances} setAppliances={setAppliances} consumables={consumables} setConsumables={setConsumables} pets={pets} setPets={setPets} contacts={contacts} setContacts={setContacts} maintenanceItems={maintenanceItems} setMaintenanceItems={setMaintenanceItems} budget={budget} setBudget={setBudget} subscriptions={subscriptions} setSubscriptions={setSubscriptions} projects={projects} setProjects={setProjects} pantry={pantry} setPantry={setPantry} wishlist={wishlist} setWishlist={setWishlist} claudeInbox={claudeInbox} setClaudeInbox={setClaudeInbox} isAdmin={!!auth&&!currentMember&&!kiosk}/>}
     {installPrompt&&!installDismissed&&mode!=='display'&&(
       <div style={{position:'fixed',bottom:0,left:0,right:0,zIndex:9998,background:isDarkNow?'#1c1c1e':'#ffffff',borderTop:`1px solid ${isDarkNow?'rgba(255,255,255,0.1)':'rgba(0,0,0,0.08)'}`,padding:'14px 20px',display:'flex',alignItems:'center',gap:14,boxShadow:'0 -4px 24px rgba(0,0,0,0.12)'}}>
         <div style={{fontSize:22,flexShrink:0}}>📲</div>

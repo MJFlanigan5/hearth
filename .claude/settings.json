@@ -1,3 +1,3 @@
 {
-  "enabledMcpServers": ["homey"]
+  "enabledMcpServers": ["homey", "homeassistant"]
 }
