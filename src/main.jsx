@@ -8848,6 +8848,17 @@ function WishlistScreen({wishlist,setWishlist,toastAdd}){
   const [editItem,setEditItem]=useState(null);
   const [form,setForm]=useState(blank);
   const [checkingId,setCheckingId]=useState(null);
+  const [search,setSearch]=useState('');
+  const [categoryFilter,setCategoryFilter]=useState('All');
+
+  const filtered=useMemo(()=>{
+    const q=search.trim().toLowerCase();
+    return (wishlist||[]).filter(w=>{
+      if(categoryFilter!=='All'&&w.category!==categoryFilter) return false;
+      if(!q) return true;
+      return w.name.toLowerCase().includes(q)||(w.notes||'').toLowerCase().includes(q);
+    });
+  },[wishlist,search,categoryFilter]);
 
   const openNew=()=>{setEditItem(null);setForm(blank);setDrawer(true);};
   const openEdit=w=>{setEditItem(w);setForm({name:w.name,url:w.url||'',target_price:w.target_price!=null?String(w.target_price):'',category:w.category||'Personal',notes:w.notes||''});setDrawer(true);};
@@ -8884,7 +8895,7 @@ function WishlistScreen({wishlist,setWishlist,toastAdd}){
 
   return(
     <div>
-      <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:24}}>
+      <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:24,gap:12,flexWrap:'wrap'}}>
         <h1 style={{fontSize:isMobile?34:44,fontWeight:800,letterSpacing:'-.05em',lineHeight:1.05}}>Wishlist</h1>
         <Btn onClick={openNew}>+ Add</Btn>
       </div>
@@ -8894,8 +8905,19 @@ function WishlistScreen({wishlist,setWishlist,toastAdd}){
           <div style={{fontSize:15,color:A.label3,fontWeight:500}}>Track things you're watching — set a target price and get notified when it drops.</div>
         </Card>
       ):(
+        <>
+        <div style={{display:'flex',gap:8,marginBottom:16,flexWrap:'wrap'}}>
+          <Inp value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search name or notes..." style={{flex:1,minWidth:200}}/>
+          <select value={categoryFilter} onChange={e=>setCategoryFilter(e.target.value)} style={{padding:'9px 12px',borderRadius:A.rXs,border:`1.5px solid ${A.sep}`,background:A.inputBg,fontSize:15,color:A.label1}}>
+            <option value="All">All categories</option>
+            {CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <div style={{fontSize:12,color:A.label4,marginBottom:8}}>{filtered.length} of {wishlist.length} item{wishlist.length===1?'':'s'}</div>
         <Card style={{overflow:'hidden',padding:0}}>
-          {(wishlist||[]).map((w,i)=>{
+          {filtered.length===0?(
+            <div style={{padding:'32px 18px',textAlign:'center',fontSize:14,color:A.label4}}>No items match.</div>
+          ):filtered.map((w,i)=>{
             const hit=atTarget(w);
             return(
               <div key={w.id} style={{display:'flex',alignItems:'center',gap:12,padding:'14px 18px',borderTop:i>0?`1px solid ${A.sep}`:'none'}}>
@@ -8917,6 +8939,7 @@ function WishlistScreen({wishlist,setWishlist,toastAdd}){
             );
           })}
         </Card>
+        </>
       )}
       <Drawer open={drawer} onClose={()=>{setDrawer(false);setEditItem(null);}} title={editItem?'Edit Item':'Add Item'}>
         <FormGroup label="Name">
