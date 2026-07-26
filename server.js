@@ -258,6 +258,8 @@ function addMonths(d) {
   d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
 }
 
+const WEEKLY_DAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
 function computeNextDue(recurrence, fromDate) {
   // Use fromDate (chore's current next_due) as base so missed chores
   // advance from their scheduled date rather than from now.
@@ -271,7 +273,19 @@ function computeNextDue(recurrence, fromDate) {
     d.setDate(d.getDate() + 1);
     while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
   } else if (recurrence === 'One-time') return '9999-12-31';
-  else d.setDate(d.getDate() + 7); // Weekly
+  else {
+    // Weekly — advance to the next occurrence of the chore's intended weekday
+    // (e.g. "Weekly (Sat)"), self-correcting if a prior completion drifted
+    // the schedule onto the wrong day instead of blindly adding 7 days.
+    const m = recurrence.match(/Weekly \(([A-Za-z]{3})\)/);
+    const targetDay = m ? WEEKLY_DAY_INDEX[m[1]] : undefined;
+    if (targetDay !== undefined) {
+      d.setDate(d.getDate() + 1);
+      while (d.getDay() !== targetDay) d.setDate(d.getDate() + 1);
+    } else {
+      d.setDate(d.getDate() + 7);
+    }
+  }
   return localDate(d);
 }
 
