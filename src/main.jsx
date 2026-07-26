@@ -8734,25 +8734,50 @@ function PantryPhotoDrawer({open,onClose,setPantry,toastAdd}){
   const reset=()=>{setPhotos([]);setItems(null);};
   const close=()=>{reset();onClose();};
 
-  const addPhoto=e=>{
+  // Downscale to a max 1568px edge and re-encode as JPEG before upload — phone
+  // camera photos routinely run several MB each, and a few of them stacked as
+  // base64 in one JSON body can blow past the server's 20mb request limit.
+  // 1568px is also the point past which Claude's vision API gains nothing from
+  // higher resolution, so this costs no recognition accuracy.
+  const resizeImage=file=>new Promise((resolve,reject)=>{
+    const img=new Image();
+    const objectUrl=URL.createObjectURL(file);
+    img.onload=()=>{
+      URL.revokeObjectURL(objectUrl);
+      const maxEdge=1568;
+      const scale=Math.min(1,maxEdge/Math.max(img.width,img.height));
+      const w=Math.round(img.width*scale),h=Math.round(img.height*scale);
+      const canvas=document.createElement('canvas');
+      canvas.width=w;canvas.height=h;
+      canvas.getContext('2d').drawImage(img,0,0,w,h);
+      const dataUrl=canvas.toDataURL('image/jpeg',0.82);
+      resolve({dataUrl,base64:dataUrl.split(',')[1]});
+    };
+    img.onerror=()=>{URL.revokeObjectURL(objectUrl);reject(new Error('image load failed'));};
+    img.src=objectUrl;
+  });
+
+  const addPhoto=async e=>{
     const file=e.target.files?.[0];
     e.target.value='';
     if(!file) return;
-    const reader=new FileReader();
-    reader.onload=()=>{
-      const dataUrl=reader.result;
-      const base64=dataUrl.split(',')[1];
-      setPhotos(p=>[...p,{dataUrl,base64,mimeType:file.type||'image/jpeg'}]);
-    };
-    reader.readAsDataURL(file);
+    try{
+      const {dataUrl,base64}=await resizeImage(file);
+      setPhotos(p=>[...p,{dataUrl,base64}]);
+    }catch{
+      toastAdd('Could not read that photo — try again','red');
+    }
   };
   const removePhoto=i=>setPhotos(p=>p.filter((_,idx)=>idx!==i));
 
   const parse=async()=>{
     if(!photos.length||parsing) return;
     setParsing(true);
-    const r=await api.post('/api/pantry/photo-parse',{images:photos.map(p=>p.base64),mimeType:photos[0].mimeType}).catch(()=>null);
+    let r=null,err=null;
+    try{ r=await api.post('/api/pantry/photo-parse',{images:photos.map(p=>p.base64),mimeType:'image/jpeg'}); }
+    catch(e){ err=e; }
     setParsing(false);
+    if(err?.body?.error==='no_ai_key'){toastAdd('No AI provider configured — check Settings','red');return;}
     if(!r?.items){toastAdd('Failed to analyze photos','red');return;}
     if(!r.items.length){toastAdd('No items recognized — try again with clearer photos','red');return;}
     setItems(r.items.map(it=>({name:it.name||'',quantity:String(it.quantity||1),unit:it.unit||'',category:it.category||'Other'})));

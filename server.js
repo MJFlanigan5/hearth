@@ -4559,6 +4559,9 @@ app.post('/api/pantry', requireAuth, (req, res) => {
 app.post('/api/pantry/photo-parse', requireAuth, async (req, res) => {
   const { images, mimeType } = req.body || {};
   if (!Array.isArray(images) || !images.length) return res.status(400).json({ error: 'images array required' });
+  const getSetting = k => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value || '';
+  const hasKey = !!(getSetting('ai_api_key') || getSetting('anthropic_api_key') || process.env.ANTHROPIC_API_KEY);
+  if (!hasKey) return res.status(400).json({ error: 'no_ai_key' });
   const items = await callAiForPantryPhotos(images, mimeType || 'image/jpeg');
   res.json({ items });
 });
