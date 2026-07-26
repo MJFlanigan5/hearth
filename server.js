@@ -1507,7 +1507,7 @@ cron.schedule('0 */6 * * *', async () => {
   for (const w of items) {
     try {
       const price = await checkWishlistPrice(w.url);
-      db.prepare('UPDATE wishlist_items SET current_price=?,last_checked=? WHERE id=?').run(price, new Date().toISOString(), w.id);
+      recordWishlistCheck(w.id, price);
       if (price != null && price <= w.target_price) {
         await sendPushToAll({ title: 'Kith', body: `${w.name} dropped to $${price} (target $${w.target_price})`, tag: 'wishlist-price' });
       }
@@ -3335,6 +3335,17 @@ async function checkWishlistPrice(url) {
   } catch { return null; }
 }
 
+// Record a price-check attempt. A failed/null check still updates last_checked
+// (so staleness is visible) but never overwrites a previously-known-good price —
+// one flaky fetch shouldn't erase real data.
+function recordWishlistCheck(id, price) {
+  if (price != null) {
+    db.prepare('UPDATE wishlist_items SET current_price=?,last_checked=? WHERE id=?').run(price, new Date().toISOString(), id);
+  } else {
+    db.prepare('UPDATE wishlist_items SET last_checked=? WHERE id=?').run(new Date().toISOString(), id);
+  }
+}
+
 // Shared AI caller — system prompt + user content, returns parsed JSON or null
 async function callAi(systemPrompt, userContent) {
   const getSetting = k => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value || '';
@@ -4657,11 +4668,11 @@ app.post('/api/wishlist/:id/check', requireAuth, async (req, res) => {
   if (!w) return res.status(404).json({ error: 'Not found' });
   if (!w.url) return res.status(400).json({ error: 'no_url' });
   const price = await checkWishlistPrice(w.url);
-  db.prepare('UPDATE wishlist_items SET current_price=?,last_checked=? WHERE id=?').run(price, new Date().toISOString(), w.id);
+  recordWishlistCheck(w.id, price);
   if (price != null && w.target_price != null && price <= w.target_price) {
     await sendPushToAll({ title: 'Kith', body: `${w.name} dropped to $${price} (target $${w.target_price})`, tag: 'wishlist-price' });
   }
-  res.json(db.prepare('SELECT * FROM wishlist_items WHERE id=?').get(w.id));
+  res.json({ ...db.prepare('SELECT * FROM wishlist_items WHERE id=?').get(w.id), check_failed: price == null });
 });
 
 // ── Routes: School ────────────────────────────────────────────────────────────

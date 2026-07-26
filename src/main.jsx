@@ -8877,7 +8877,8 @@ function WishlistScreen({wishlist,setWishlist,toastAdd}){
     setCheckingId(null);
     if(!r?.id){toastAdd('Price check failed — site may block automated requests','red');return;}
     setWishlist(w=>w.map(x=>x.id===r.id?r:x));
-    toastAdd(r.current_price!=null?`Current price: $${r.current_price}`:'No price found on that page','blue');
+    if(r.check_failed){toastAdd(r.current_price!=null?`Couldn't reach the page — showing last known price ($${r.current_price})`:'No price found on that page','red');}
+    else{toastAdd(`Current price: $${r.current_price}`,'blue');}
   };
   const atTarget=w=>w.target_price!=null&&w.current_price!=null&&w.current_price<=w.target_price;
 
