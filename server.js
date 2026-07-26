@@ -1807,6 +1807,26 @@ app.get('/api/ha/smart-home-status', requireAdmin, (req, res) => {
   });
 });
 
+// ── Voice timer — live state for the Display Mode ticker ────────────────────
+app.get('/api/ha/timer', requireAuth, async (req, res) => {
+  const get = k => db.prepare(`SELECT value FROM settings WHERE key=?`).get(k)?.value;
+  const haUrl = get('ha_url'); const haToken = get('ha_token');
+  if (!haUrl || !haToken) return res.json({ active: false });
+  try {
+    const base = haUrl.replace(/\/$/, '');
+    const r = await fetch(`${base}/api/states/timer.voice_timer`, {
+      headers: { 'Authorization': `Bearer ${haToken}` },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!r.ok) return res.json({ active: false });
+    const s = await r.json();
+    if (s.state !== 'active' && s.state !== 'paused') return res.json({ active: false });
+    res.json({ active: true, paused: s.state === 'paused', finishes_at: s.attributes?.finishes_at || null, remaining: s.attributes?.remaining || null });
+  } catch {
+    res.json({ active: false });
+  }
+});
+
 // ── HA entity discovery — finds Moen/Flo and UniFi entities ─────────────────
 app.post('/api/ha/discover', requireAdmin, async (req, res) => {
   const get = k => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value || '';

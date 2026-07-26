@@ -666,6 +666,14 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
     return()=>clearInterval(id);
   },[]);
 
+  const [voiceTimer,setVoiceTimer]=useState({active:false});
+  useEffect(()=>{
+    const load=()=>api.get('/api/ha/timer').then(d=>{if(d&&typeof d==='object')setVoiceTimer(d);}).catch(()=>{});
+    load();
+    const id=setInterval(load,10000);
+    return()=>clearInterval(id);
+  },[]);
+
   const [haEvents,setHaEvents]=useState([]);
   const [smEvents,setSmEvents]=useState([]);
   const [widgetData,setWidgetData]=useState({});
@@ -695,6 +703,15 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
     return()=>{clearInterval(fa);clearInterval(fb);clearInterval(fc);es.close();};
   },[]);
   const allSmartEvents=useMemo(()=>[...smEvents,...haEvents].sort((a,b)=>new Date(b.created_at?.replace(' ','T'))-new Date(a.created_at?.replace(' ','T'))).slice(0,10),[smEvents,haEvents]);
+  const timerRemaining=useMemo(()=>{
+    if(!voiceTimer.active) return null;
+    if(voiceTimer.paused) return 'paused';
+    if(!voiceTimer.finishes_at) return voiceTimer.remaining||null;
+    const ms=new Date(voiceTimer.finishes_at).getTime()-now.getTime();
+    if(ms<=0) return '0:00';
+    const totalSec=Math.floor(ms/1000);
+    return `${Math.floor(totalSec/60)}:${String(totalSec%60).padStart(2,'0')}`;
+  },[voiceTimer,now]);
   const [nowPlaying,setNowPlaying]=useState({playing:false});
   const [qaState,setQaState]=useState({});
   useEffect(()=>{
@@ -2189,6 +2206,15 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
               {nowPlaying.thumb?<img src={nowPlaying.thumb} style={{width:14,height:14,borderRadius:2,objectFit:'cover',flexShrink:0}}/>:<svg width="12" height="12" viewBox="0 0 24 24" fill={A.amber} style={{flexShrink:0}}><path d="M12 3v10.55A4 4 0 1014 17V7h4V3h-6z"/></svg>}
               <span style={{fontSize:12,color:A.amber,fontWeight:600,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:'28%'}}>
                 {nowPlaying.title}{nowPlaying.artist?` · ${nowPlaying.artist}`:''}
+              </span>
+            </>
+          )}
+          {voiceTimer.active&&(
+            <>
+              {(news.length>0||allSmartEvents.length>0||liveGames.length>0||nowPlaying.playing)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
+              <svg width="12" height="12" viewBox="0 0 24 24" fill={A.blue} style={{flexShrink:0}}><path d="M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61l1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 1.42A8.962 8.962 0 0012 4c-4.97 0-9 4.03-9 9s4.02 9 9 9a9 9 0 006.03-15.61zM12 20c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"/></svg>
+              <span style={{fontSize:12,color:A.blue,fontWeight:600,flexShrink:0}}>
+                {timerRemaining==='paused'?'Timer paused':`Timer · ${timerRemaining} left`}
               </span>
             </>
           )}
