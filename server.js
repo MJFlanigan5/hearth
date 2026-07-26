@@ -1132,6 +1132,12 @@ app.post('/api/push/test', requireAuth, async (req, res) => {
   res.json({ ok: true, sent: subs.length });
 });
 
+app.post('/api/push/pantry-photo-prompt', requireAuth, async (req, res) => {
+  const subs = db.prepare('SELECT * FROM push_subscriptions').all();
+  await sendPushToAll({ title: 'Kith', body: "Add your groceries to the pantry — open Pantry and tap Add from Photo.", tag: 'pantry-photo' });
+  res.json({ ok: true, sent: subs.length });
+});
+
 // ── Routes: Settings ──────────────────────────────────────────────────────────
 const SETTINGS_SENSITIVE = new Set(['email_webhook_secret','anthropic_api_key','ai_api_key','beehiiv_api_key','youtube_api_key','etsy_api_key','teslemetry_api_key','aviationstack_api_key','lastfm_api_key','nextdns_api_key','beszel_user','beszel_pass','jwt_secret','vapid_public','vapid_private','admin_pin_hash','resend_api_key','ha_webhook_secret','smart_home_token','ha_token','homey_token','plex_token','spotify_refresh_token','moen_pass','unifi_pass','wifi_password','smtp_pass','imap_pass','smtp_user','imap_user']);
 app.get('/api/settings', requireAuth, (req, res) => {
@@ -3251,6 +3257,54 @@ async function callAiWithMedia(imageBase64, mimeType) {
   } catch { return []; }
 }
 
+async function callAiForPantryPhotos(imagesBase64, mimeType) {
+  const getSetting = k => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value || '';
+  const provider = getSetting('ai_provider') || 'anthropic';
+  const apiKey = getSetting('ai_api_key') || getSetting('anthropic_api_key') || process.env.ANTHROPIC_API_KEY || '';
+  if (!apiKey) return [];
+  const prompt = 'These photos show groceries or pantry items, possibly the same haul spread across multiple photos. Identify each distinct item and estimate a reasonable quantity (count identical items when visibly countable, otherwise use 1). Deduplicate items that appear in more than one photo. Return JSON only, no other text.\nReturn: {"items":[{"name":"...","quantity":1,"unit":"","category":"Produce|Dairy|Meat|Grains|Snacks|Drinks|Spices|Frozen|Other"}]}\nReturn {"items":[]} if nothing recognizable is found.';
+  try {
+    const aiTimeout = AbortSignal.timeout(30000);
+    let text;
+    if (provider === 'gemini') {
+      const parts = imagesBase64.map(data => ({ inlineData: { mimeType, data } }));
+      parts.push({ text: prompt });
+      const data = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts }], generationConfig: { responseMimeType: 'application/json' } }),
+        signal: aiTimeout,
+      }).then(r => r.json());
+      text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    } else if (provider === 'anthropic') {
+      const content = imagesBase64.map(data => ({ type: 'image', source: { type: 'base64', media_type: mimeType, data } }));
+      content.push({ type: 'text', text: prompt });
+      const data = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1500, messages: [{ role: 'user', content }] }),
+        signal: aiTimeout,
+      }).then(r => r.json());
+      text = data.content?.[0]?.text;
+    } else if (provider === 'openai' || provider === 'groq') {
+      const baseUrl = provider === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1';
+      const model = provider === 'groq' ? 'llama-3.2-90b-vision-preview' : 'gpt-4o-mini';
+      const content = imagesBase64.map(data => ({ type: 'image_url', image_url: { url: `data:${mimeType};base64,${data}` } }));
+      content.push({ type: 'text', text: prompt });
+      const data = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({ model, max_tokens: 1500, messages: [{ role: 'user', content }] }),
+        signal: aiTimeout,
+      }).then(r => r.json());
+      text = data.choices?.[0]?.message?.content;
+    } else {
+      return []; // provider doesn't support vision
+    }
+    if (text) text = text.replace(/^```[^\n]*\n?/, '').replace(/\n?```$/, '').trim();
+    const parsed = text ? JSON.parse(text) : null;
+    return Array.isArray(parsed?.items) ? parsed.items : [];
+  } catch (e) { console.warn('[ai] pantry photo parse failed:', e.message); return []; }
+}
+
 // Shared AI caller — system prompt + user content, returns parsed JSON or null
 async function callAi(systemPrompt, userContent) {
   const getSetting = k => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value || '';
@@ -4501,6 +4555,12 @@ app.post('/api/pantry', requireAuth, (req, res) => {
   const r = db.prepare('INSERT INTO pantry_items (name,location,quantity,unit,expires_on,low_stock_at,category) VALUES (?,?,?,?,?,?,?)')
     .run(name.trim(), location, Number(quantity)||0, unit, expires_on, Number(low_stock_at)||0, category);
   res.json(_pantryEnrich(db.prepare('SELECT * FROM pantry_items WHERE id=?').get(r.lastInsertRowid)));
+});
+app.post('/api/pantry/photo-parse', requireAuth, async (req, res) => {
+  const { images, mimeType } = req.body || {};
+  if (!Array.isArray(images) || !images.length) return res.status(400).json({ error: 'images array required' });
+  const items = await callAiForPantryPhotos(images, mimeType || 'image/jpeg');
+  res.json({ items });
 });
 app.put('/api/pantry/:id', requireAuth, (req, res) => {
   const p = db.prepare('SELECT * FROM pantry_items WHERE id=?').get(Number(req.params.id));

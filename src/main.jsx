@@ -8724,12 +8724,104 @@ function ProjectsScreen({projects,setProjects,toastAdd}){
   );
 }
 
+function PantryPhotoDrawer({open,onClose,setPantry,toastAdd}){
+  const [photos,setPhotos]=useState([]);
+  const [items,setItems]=useState(null);
+  const [parsing,setParsing]=useState(false);
+  const [saving,setSaving]=useState(false);
+  const fileRef=useRef(null);
+
+  const reset=()=>{setPhotos([]);setItems(null);};
+  const close=()=>{reset();onClose();};
+
+  const addPhoto=e=>{
+    const file=e.target.files?.[0];
+    e.target.value='';
+    if(!file) return;
+    const reader=new FileReader();
+    reader.onload=()=>{
+      const dataUrl=reader.result;
+      const base64=dataUrl.split(',')[1];
+      setPhotos(p=>[...p,{dataUrl,base64,mimeType:file.type||'image/jpeg'}]);
+    };
+    reader.readAsDataURL(file);
+  };
+  const removePhoto=i=>setPhotos(p=>p.filter((_,idx)=>idx!==i));
+
+  const parse=async()=>{
+    if(!photos.length||parsing) return;
+    setParsing(true);
+    const r=await api.post('/api/pantry/photo-parse',{images:photos.map(p=>p.base64),mimeType:photos[0].mimeType}).catch(()=>null);
+    setParsing(false);
+    if(!r?.items){toastAdd('Failed to analyze photos','red');return;}
+    if(!r.items.length){toastAdd('No items recognized — try again with clearer photos','red');return;}
+    setItems(r.items.map(it=>({name:it.name||'',quantity:String(it.quantity||1),unit:it.unit||'',category:it.category||'Other'})));
+  };
+
+  const updateItem=(i,field,val)=>setItems(list=>list.map((it,idx)=>idx===i?{...it,[field]:val}:it));
+  const removeItem=i=>setItems(list=>list.filter((_,idx)=>idx!==i));
+
+  const saveAll=async()=>{
+    if(!items?.length||saving) return;
+    setSaving(true);
+    let added=0;
+    for(const it of items){
+      if(!it.name.trim()) continue;
+      const r=await api.post('/api/pantry',{name:it.name.trim(),location:'Pantry',quantity:Number(it.quantity)||1,unit:it.unit,expires_on:'',low_stock_at:'0',category:it.category}).catch(()=>null);
+      if(r?.id){added++;setPantry(p=>[...p,r]);}
+    }
+    setSaving(false);
+    toastAdd(`Added ${added} item${added===1?'':'s'} to pantry`);
+    close();
+  };
+
+  return(
+    <Drawer open={open} onClose={close} title="Add from Photo">
+      {items===null?(
+        <>
+          <FormGroup label={`Photos (${photos.length})`} footer="Take one photo per bag or area — spread items out so they're not overlapping. Add as many as you need.">
+            <div style={{padding:'12px 16px',display:'flex',flexWrap:'wrap',gap:8}}>
+              {photos.map((p,i)=>(
+                <div key={i} style={{position:'relative',width:72,height:72}}>
+                  <img src={p.dataUrl} style={{width:72,height:72,objectFit:'cover',borderRadius:A.rXs}}/>
+                  <button onClick={()=>removePhoto(i)} style={{position:'absolute',top:-6,right:-6,width:20,height:20,borderRadius:'50%',background:A.red,color:'#fff',border:'none',fontSize:12,cursor:'pointer',lineHeight:'20px',padding:0}}>×</button>
+                </div>
+              ))}
+              <button onClick={()=>fileRef.current?.click()} style={{width:72,height:72,borderRadius:A.rXs,border:`1.5px dashed ${A.sep}`,background:A.inputBg,display:'flex',alignItems:'center',justifyContent:'center',fontSize:24,color:A.label4,cursor:'pointer'}}>+</button>
+              <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={addPhoto} style={{display:'none'}}/>
+            </div>
+          </FormGroup>
+          <Btn onClick={parse} full style={{opacity:photos.length&&!parsing?1:.5}}>{parsing?'Analyzing…':`Analyze ${photos.length} Photo${photos.length===1?'':'s'}`}</Btn>
+          <Btn variant="ghost" onClick={close} full style={{marginTop:8}}>Cancel</Btn>
+        </>
+      ):(
+        <>
+          <div style={{fontSize:13,color:A.label3,padding:'0 2px 12px'}}>{items.length} item{items.length===1?'':'s'} found — review and adjust before adding.</div>
+          <div style={{display:'flex',flexDirection:'column',gap:8}}>
+            {items.map((it,i)=>(
+              <div key={i} style={{display:'flex',gap:6,alignItems:'center'}}>
+                <Inp value={it.name} onChange={e=>updateItem(i,'name',e.target.value)} style={{flex:2}}/>
+                <Inp type="number" value={it.quantity} onChange={e=>updateItem(i,'quantity',e.target.value)} style={{flex:1,minWidth:0}}/>
+                <Inp value={it.unit} onChange={e=>updateItem(i,'unit',e.target.value)} placeholder="unit" style={{flex:1,minWidth:0}}/>
+                <button onClick={()=>removeItem(i)} style={{background:'none',border:'none',color:A.label4,fontSize:18,cursor:'pointer',padding:'0 4px',flexShrink:0}}>×</button>
+              </div>
+            ))}
+          </div>
+          <Btn onClick={saveAll} full style={{marginTop:16,opacity:items.length&&!saving?1:.5}}>{saving?'Adding…':`Add ${items.length} to Pantry`}</Btn>
+          <Btn variant="ghost" onClick={()=>setItems(null)} full style={{marginTop:8}}>Back to Photos</Btn>
+        </>
+      )}
+    </Drawer>
+  );
+}
+
 function PantryScreen({pantry,setPantry,grocery,setGrocery,toastAdd}){
   const isMobile=useIsMobile();
   const LOCATIONS=['Fridge','Freezer','Pantry','Cabinet','Other'];
   const CATEGORIES=['Produce','Dairy','Meat','Grains','Snacks','Drinks','Spices','Frozen','Other'];
   const blank={name:'',location:'Pantry',quantity:'1',unit:'',expires_on:'',low_stock_at:'0',category:'Other'};
   const [drawer,setDrawer]=useState(false);
+  const [photoDrawer,setPhotoDrawer]=useState(false);
   const [editItem,setEditItem]=useState(null);
   const [form,setForm]=useState(blank);
   const [useTarget,setUseTarget]=useState(null);
@@ -8786,7 +8878,10 @@ function PantryScreen({pantry,setPantry,grocery,setGrocery,toastAdd}){
     <div>
       <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:24}}>
         <h1 style={{fontSize:isMobile?34:44,fontWeight:800,letterSpacing:'-.05em',lineHeight:1.05}}>Pantry</h1>
-        <Btn onClick={openNew}>+ Add</Btn>
+        <div style={{display:'flex',gap:8}}>
+          <Btn variant="ghost" onClick={()=>setPhotoDrawer(true)}>+ Photo</Btn>
+          <Btn onClick={openNew}>+ Add</Btn>
+        </div>
       </div>
       {needReplace.length>0&&(
         <Card style={{padding:'14px 18px',marginBottom:16,display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
@@ -8881,6 +8976,7 @@ function PantryScreen({pantry,setPantry,grocery,setGrocery,toastAdd}){
           </div>
         </div>
       )}
+      <PantryPhotoDrawer open={photoDrawer} onClose={()=>setPhotoDrawer(false)} setPantry={setPantry} toastAdd={toastAdd}/>
     </div>
   );
 }
