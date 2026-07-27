@@ -4722,6 +4722,27 @@ app.delete('/api/claude-inbox/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Routes: Voice Profiles ──────────────────────────────────────────────────────
+app.get('/api/voice-profiles', requireAdmin, (req, res) => {
+  res.json(db.prepare(`
+    SELECT vp.*, fm.name as member_name, fm.color as member_color, fm.initials as member_initials
+    FROM voice_profiles vp JOIN family_members fm ON fm.id = vp.member_id
+    ORDER BY vp.enrolled_at DESC
+  `).all());
+});
+app.post('/api/voice-profiles', requireAdmin, (req, res) => {
+  const { member_id, embedding_ref } = req.body || {};
+  if (!member_id || !embedding_ref?.trim()) return res.status(400).json({ error: 'member_id and embedding_ref required' });
+  const member = db.prepare('SELECT id FROM family_members WHERE id=?').get(Number(member_id));
+  if (!member) return res.status(404).json({ error: 'family member not found' });
+  const r = db.prepare('INSERT INTO voice_profiles (member_id,embedding_ref) VALUES (?,?)').run(Number(member_id), embedding_ref.trim());
+  res.json(db.prepare('SELECT * FROM voice_profiles WHERE id=?').get(r.lastInsertRowid));
+});
+app.delete('/api/voice-profiles/:id', requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM voice_profiles WHERE id=?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
 // ── Routes: School ────────────────────────────────────────────────────────────
 app.get('/api/school', requireAuth, (req, res) => {
   const members = db.prepare('SELECT * FROM school_members ORDER BY id').all();

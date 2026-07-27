@@ -473,6 +473,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS claude_inbox (
   read INTEGER NOT NULL DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now'))
 )`)
+db.exec(`CREATE TABLE IF NOT EXISTS voice_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  member_id INTEGER NOT NULL REFERENCES family_members(id),
+  embedding_ref TEXT NOT NULL,
+  enrolled_at TEXT DEFAULT (datetime('now'))
+)`)
 db.exec(`CREATE TABLE IF NOT EXISTS school_members (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   member_id INTEGER,
