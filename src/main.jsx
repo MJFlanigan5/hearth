@@ -2351,11 +2351,24 @@ function DashboardScreen({events,setEvents,chores,grocery,meals,countdowns,weath
     const loadSm=()=>api.get('/api/ha/pull').then(d=>{if(!cancelled&&Array.isArray(d))setSmEvents(d);}).catch(()=>{});
     loadHA(); loadSm();
     const fa=setInterval(loadHA,60000); const fb=setInterval(loadSm,60000);
-    const _sseToken=localStorage.getItem('kith_token')||'';
-    const es=new EventSource(`/api/events/stream?token=${encodeURIComponent(_sseToken)}`);
-    es.addEventListener('activity',e=>{try{const ev=JSON.parse(e.data);setSmEvents(p=>[ev,...p].slice(0,10));}catch{}});
-    es.addEventListener('refresh',()=>{loadHA();loadSm();});
-    return()=>{cancelled=true;clearInterval(fa);clearInterval(fb);es.close();};
+    // Same fix as the Display Mode SSE connection: re-read the token fresh on
+    // every (re)connect attempt instead of baking a snapshot into the URL,
+    // and actually retry on error instead of leaving the connection dead.
+    let es=null;
+    let reconnectTimer=null;
+    const connect=()=>{
+      if(cancelled) return;
+      const _sseToken=localStorage.getItem('kith_token')||'';
+      es=new EventSource(`/api/events/stream?token=${encodeURIComponent(_sseToken)}`);
+      es.addEventListener('activity',e=>{try{const ev=JSON.parse(e.data);setSmEvents(p=>[ev,...p].slice(0,10));}catch{}});
+      es.addEventListener('refresh',()=>{loadHA();loadSm();});
+      es.addEventListener('error',()=>{
+        es.close();
+        if(!cancelled) reconnectTimer=setTimeout(connect,3000);
+      });
+    };
+    connect();
+    return()=>{cancelled=true;clearInterval(fa);clearInterval(fb);clearTimeout(reconnectTimer);es?.close();};
   },[]);
   const allSmartEvents=useMemo(()=>[...smEvents,...haEvents].sort((a,b)=>new Date(b.created_at?.replace(' ','T'))-new Date(a.created_at?.replace(' ','T'))).slice(0,10),[smEvents,haEvents]);
 
