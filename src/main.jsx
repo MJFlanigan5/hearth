@@ -2779,7 +2779,7 @@ function CalendarScreen({events,setEvents,icsSources,toastAdd,members,clockForma
       } else {
         const created=await api.post('/api/events',payload);
         if(created?.error){toastAdd(created.error||'Failed to save event','red');return;}
-        api.get('/api/events').then(d=>{if(Array.isArray(d))setEvents(d);});
+        api.get('/api/events').then(d=>{if(Array.isArray(d))setEvents(d);}).catch(()=>{});
         toastAdd('Event saved');
       }
       setDrawerOpen(false);
@@ -3292,7 +3292,7 @@ function InboxScreen({toastAdd,events,setEvents,setInboxCount}){
       if(result.error){toastAdd(result.error,'red');return;}
       setPending(p=>{const next=p.filter(i=>i.id!==id);setInboxCount(next.length);return next;});
       setRecent(p=>[{event_name:item.event_name,event_date:isoDate,source:'Email'},...p]);
-      api.get('/api/events').then(d=>{if(Array.isArray(d))setEvents(d);});
+      api.get('/api/events').then(d=>{if(Array.isArray(d))setEvents(d);}).catch(()=>{});
       toastAdd('Added to Kith Calendar');
     }catch(e){toastAdd('Failed to add event','red');}
   };
@@ -4753,6 +4753,10 @@ function SettingsScreen({toastAdd,icsSources,setIcsSources,onDisplay,photos,setP
                   const _sseToken=localStorage.getItem('kith_token')||'';
                   const es=new EventSource(`/api/events/stream?token=${encodeURIComponent(_sseToken)}`);
                   const tid=setTimeout(()=>{es.close();setImapScanning(false);},5*60*1000);
+                  es.addEventListener('error',()=>{
+                    clearTimeout(tid);es.close();setImapScanning(false);
+                    toastAdd('Lost connection during scan — it may still finish in the background','red');
+                  });
                   es.addEventListener('scan_complete',e=>{
                     clearTimeout(tid);es.close();setImapScanning(false);
                     try{
