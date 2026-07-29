@@ -726,7 +726,10 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
     const ms=new Date(voiceTimer.finishes_at).getTime()-now.getTime();
     if(ms<=0) return '0:00';
     const totalSec=Math.floor(ms/1000);
-    return `${Math.floor(totalSec/60)}:${String(totalSec%60).padStart(2,'0')}`;
+    const h=Math.floor(totalSec/3600);
+    const m=Math.floor((totalSec%3600)/60);
+    const s=totalSec%60;
+    return h>0?`${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${m}:${String(s).padStart(2,'0')}`;
   },[voiceTimer,now]);
   const [nowPlaying,setNowPlaying]=useState({playing:false});
   const [qaState,setQaState]=useState({});
