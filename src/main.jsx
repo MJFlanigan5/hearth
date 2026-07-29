@@ -687,20 +687,36 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
     const fa=setInterval(loadHA,60000);
     const fb=setInterval(loadSm,60000);
     const fc=setInterval(loadWidgets,3*60*1000);
-    // Single SSE connection handles activity push + widget/smart-home refresh
-    const _sseToken=localStorage.getItem('kith_token')||'';
-    const es=new EventSource(`/api/events/stream?token=${encodeURIComponent(_sseToken)}`);
-    es.addEventListener('activity',e=>{try{const ev=JSON.parse(e.data);setSmEvents(p=>[ev,...p].slice(0,10));}catch{}});
-    es.addEventListener('refresh',()=>{loadHA();loadSm();loadWidgets();});
-    es.addEventListener('grocery',e=>{try{const d=JSON.parse(e.data);if(setGrocery){if(d.action==='add')setGrocery(p=>[...p,d.item]);else if(d.action==='remove')setGrocery(p=>p.filter(i=>i.id!==d.id));else if(d.action==='toggle'){if(!d.checked){/* another device un-checked — cancel pending delete timer */const rt=window.__groceryRemoveTimers;if(rt){clearTimeout(rt[d.id]);clearTimeout(rt[`${d.id}_fade`]);delete rt[d.id];delete rt[`${d.id}_fade`];}}setGrocery(p=>p.map(i=>i.id===d.id?{...i,checked:d.checked}:i));}else if(d.action==='clear_checked')setGrocery(p=>p.filter(i=>!i.checked));}}catch{}});
-    es.addEventListener('packages',()=>{
-      api.get('/api/packages').then(d=>{if(Array.isArray(d)&&setPackages)setPackages(d);}).catch(()=>{});
-    });
-    es.addEventListener('messages',()=>{api.get('/api/messages').then(d=>{if(Array.isArray(d)&&setMessages)setMessages(d);}).catch(()=>{});});
-    // bills/vehicles/inbox state lives in App — DisplayMode gets those as props, no setters available here
-    es.addEventListener('open',()=>{setOnline(true);loadWidgets();});
-    es.addEventListener('error',()=>setOnline(false));
-    return()=>{clearInterval(fa);clearInterval(fb);clearInterval(fc);es.close();};
+    // Single SSE connection handles activity push + widget/smart-home refresh.
+    // The token is read fresh on every (re)connect — if it's baked in once and
+    // later expires, the browser's native retry keeps resending the stale
+    // token, the server 401s forever, and the "synced" badge gets stuck off
+    // even though regular polling (which re-reads the token per call) keeps
+    // working fine. Re-reading on each connect attempt fixes that.
+    let cancelled=false;
+    let es=null;
+    let reconnectTimer=null;
+    const connect=()=>{
+      if(cancelled) return;
+      const _sseToken=localStorage.getItem('kith_token')||'';
+      es=new EventSource(`/api/events/stream?token=${encodeURIComponent(_sseToken)}`);
+      es.addEventListener('activity',e=>{try{const ev=JSON.parse(e.data);setSmEvents(p=>[ev,...p].slice(0,10));}catch{}});
+      es.addEventListener('refresh',()=>{loadHA();loadSm();loadWidgets();});
+      es.addEventListener('grocery',e=>{try{const d=JSON.parse(e.data);if(setGrocery){if(d.action==='add')setGrocery(p=>[...p,d.item]);else if(d.action==='remove')setGrocery(p=>p.filter(i=>i.id!==d.id));else if(d.action==='toggle'){if(!d.checked){/* another device un-checked — cancel pending delete timer */const rt=window.__groceryRemoveTimers;if(rt){clearTimeout(rt[d.id]);clearTimeout(rt[`${d.id}_fade`]);delete rt[d.id];delete rt[`${d.id}_fade`];}}setGrocery(p=>p.map(i=>i.id===d.id?{...i,checked:d.checked}:i));}else if(d.action==='clear_checked')setGrocery(p=>p.filter(i=>!i.checked));}}catch{}});
+      es.addEventListener('packages',()=>{
+        api.get('/api/packages').then(d=>{if(Array.isArray(d)&&setPackages)setPackages(d);}).catch(()=>{});
+      });
+      es.addEventListener('messages',()=>{api.get('/api/messages').then(d=>{if(Array.isArray(d)&&setMessages)setMessages(d);}).catch(()=>{});});
+      // bills/vehicles/inbox state lives in App — DisplayMode gets those as props, no setters available here
+      es.addEventListener('open',()=>{setOnline(true);loadWidgets();});
+      es.addEventListener('error',()=>{
+        setOnline(false);
+        es.close();
+        if(!cancelled) reconnectTimer=setTimeout(connect,3000);
+      });
+    };
+    connect();
+    return()=>{cancelled=true;clearInterval(fa);clearInterval(fb);clearInterval(fc);clearTimeout(reconnectTimer);es?.close();};
   },[]);
   const allSmartEvents=useMemo(()=>[...smEvents,...haEvents].sort((a,b)=>new Date(b.created_at?.replace(' ','T'))-new Date(a.created_at?.replace(' ','T'))).slice(0,10),[smEvents,haEvents]);
   const timerRemaining=useMemo(()=>{
