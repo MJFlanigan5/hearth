@@ -50,6 +50,15 @@ function getJwtSecret() {
   return s;
 }
 
+// Admin tokens carry this version in their `pv` claim; rotating the admin PIN
+// bumps it, which invalidates every previously-issued admin token on their
+// next request without touching member sessions (jwt_secret is shared across
+// both, so revoking it would also log every family member out).
+function getAdminPinVersion() {
+  const v = db.prepare('SELECT value FROM settings WHERE key=?').get('admin_pin_version')?.value;
+  return v ? parseInt(v, 10) : 1;
+}
+
 function requireAuth(req, res, next) {
   const token = (req.headers.authorization || '').replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'Authentication required' });
@@ -63,6 +72,7 @@ function requireAdmin(req, res, next) {
   try {
     const user = jwt.verify(token, getJwtSecret());
     if (user.role !== 'admin') return res.status(403).json({ error: 'Admin required' });
+    if ((user.pv || 1) !== getAdminPinVersion()) return res.status(401).json({ error: 'Invalid or expired token' });
     req.user = user; next();
   } catch { res.status(401).json({ error: 'Invalid or expired token' }); }
 }
@@ -182,6 +192,52 @@ function normalizeTime(t) {
   const compact = s.match(/^(\d{1,2})(am|pm)$/i);
   if (compact) return `${parseInt(compact[1])}:00 ${compact[2].toUpperCase()}`;
   return s;
+}
+
+// ── Recurring event occurrence generator ──────────────────────────────────────
+// Shared by POST and PUT /api/events so both paths generate occurrences the
+// same way. No renewal job re-tops these up once generated (there isn't one
+// in this codebase), so the windows below are picked to effectively never
+// run out in practice rather than being a "true" recurrence — if this ever
+// needs to be genuinely infinite, a periodic top-up job is the real fix.
+function generateOccurrences(ins, ev, seriesId) {
+  const { title, date, time, end_time, duration, calendar, color, notes, member_id, recurring_rule } = ev;
+  const rule = recurring_rule || '';
+  if (!rule || rule === 'Does not repeat') return;
+  const isLeapYear = y => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const cur = new Date(date + 'T12:00:00');
+  const origDay = cur.getDate();
+  const origMonth = cur.getMonth(); // 0-indexed
+  const origYear = cur.getFullYear();
+  let annualN = 0;
+  const limit = rule === 'Annually'
+    ? new Date(new Date(date + 'T12:00:00').setFullYear(origYear + 50))
+    : new Date(cur.getTime() + 3 * 365 * 86400000);
+  while (true) {
+    if (rule === 'Daily')          cur.setDate(cur.getDate() + 1);
+    else if (rule === 'Weekly')    cur.setDate(cur.getDate() + 7);
+    else if (rule === 'Bi-weekly') cur.setDate(cur.getDate() + 14);
+    else if (rule === 'Monthly')   { cur.setDate(1); cur.setMonth(cur.getMonth() + 1); cur.setDate(Math.min(origDay, new Date(cur.getFullYear(), cur.getMonth()+1, 0).getDate())); }
+    else if (rule === 'Annually') {
+      // Recompute from the origin month/day every time, not
+      // cur.setFullYear(cur.getFullYear() + 1) — that mutation-based
+      // approach permanently drifts a Feb 29 event to March 1 starting
+      // the very first non-leap year and never returns, even in a later
+      // real leap year (confirmed: walking 2024-02-29 forward 4 years
+      // this way lands on 2028-03-01, not 2028-02-29). Same safe pattern
+      // the member-birthday generator already uses (see /api/members/:id).
+      annualN++;
+      const y = origYear + annualN;
+      const effectiveDay = (origMonth === 1 && origDay === 29 && !isLeapYear(y)) ? 28 : origDay;
+      cur.setTime(new Date(y, origMonth, effectiveDay, 12).getTime());
+    }
+    else if (rule === 'Weekdays') {
+      cur.setDate(cur.getDate() + 1);
+      while (cur.getDay() === 0 || cur.getDay() === 6) cur.setDate(cur.getDate() + 1);
+    } else break;
+    if (cur > limit) break;
+    ins.run(title.trim(), localDate(cur), normalizeTime(time)||'All day', end_time||'', duration||'1h', calendar||'kith', color, notes||'', member_id||null, recurring_rule||'', 'manual', seriesId);
+  }
 }
 
 // ── ICS sync helper ───────────────────────────────────────────────────────────
@@ -423,7 +479,7 @@ app.post('/api/auth/setup', async (req, res) => {
   if (!String(pin || '').match(/^\d{4,8}$/)) return res.status(400).json({ error: 'PIN must be 4–8 digits' });
   const hash = await bcrypt.hash(String(pin), 10);
   db.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)').run('admin_pin_hash', hash);
-  const token = jwt.sign({ sub: 'admin', role: 'admin' }, getJwtSecret(), { expiresIn: '30d' });
+  const token = jwt.sign({ sub: 'admin', role: 'admin', pv: getAdminPinVersion() }, getJwtSecret(), { expiresIn: '30d' });
   res.json({ token });
 });
 
@@ -444,7 +500,7 @@ app.post('/api/auth/admin', authRateLimit, async (req, res) => {
   if (!hash) return res.status(401).json({ error: 'Admin not configured' });
   if (!await bcrypt.compare(String(req.body.pin || ''), hash))
     return res.status(401).json({ error: 'Wrong PIN' });
-  const token = jwt.sign({ sub: 'admin', role: 'admin' }, getJwtSecret(), { expiresIn: '30d' });
+  const token = jwt.sign({ sub: 'admin', role: 'admin', pv: getAdminPinVersion() }, getJwtSecret(), { expiresIn: '30d' });
   res.json({ token });
 });
 
@@ -452,6 +508,10 @@ app.put('/api/auth/admin/pin', requireAdmin, async (req, res) => {
   const { pin } = req.body;
   if (!String(pin || '').match(/^\d{4,8}$/)) return res.status(400).json({ error: 'PIN must be 4–8 digits' });
   db.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)').run('admin_pin_hash', await bcrypt.hash(String(pin), 10));
+  // Bump the version so every admin token issued before this PIN change is
+  // rejected on its next request — otherwise a stolen/old admin token would
+  // stay valid for its full 30-day life even after the PIN was rotated.
+  db.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)').run('admin_pin_version', String(getAdminPinVersion() + 1));
   res.json({ ok: true });
 });
 
@@ -529,30 +589,10 @@ app.post('/api/events', requireAuth, (req, res) => {
   const seriesId = r.lastInsertRowid;
 
   // Generate recurring occurrences
-  const rule = recurring_rule || '';
-  if (rule && rule !== 'Does not repeat') {
-    const ins2 = db.prepare('INSERT INTO events (title,date,time,end_time,duration,calendar,color,notes,member_id,recurring_rule,source,external_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
-    const cur = new Date(date + 'T12:00:00');
-    const origDay = cur.getDate();
-    const limit = rule === 'Annually'
-      ? new Date(new Date(date + 'T12:00:00').setFullYear(new Date(date + 'T12:00:00').getFullYear() + 5))
-      : new Date(cur.getTime() + 365 * 86400000);
-    while (true) {
-      if (rule === 'Daily')          cur.setDate(cur.getDate() + 1);
-      else if (rule === 'Weekly')    cur.setDate(cur.getDate() + 7);
-      else if (rule === 'Bi-weekly') cur.setDate(cur.getDate() + 14);
-      else if (rule === 'Monthly')   { cur.setDate(1); cur.setMonth(cur.getMonth() + 1); cur.setDate(Math.min(origDay, new Date(cur.getFullYear(), cur.getMonth()+1, 0).getDate())); }
-      else if (rule === 'Annually')  cur.setFullYear(cur.getFullYear() + 1);
-      else if (rule === 'Weekdays') {
-        cur.setDate(cur.getDate() + 1);
-        while (cur.getDay() === 0 || cur.getDay() === 6) cur.setDate(cur.getDate() + 1);
-      } else break;
-      if (cur > limit) break;
-      ins2.run(title.trim(), localDate(cur), normalizeTime(time)||'All day', end_time||'', duration||'1h', calendar||'kith', col, notes||'', member_id||null, recurring_rule||'', 'manual', seriesId);
-    }
-  }
+  const ins2 = db.prepare('INSERT INTO events (title,date,time,end_time,duration,calendar,color,notes,member_id,recurring_rule,source,external_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
+  generateOccurrences(ins2, { title, date, time, end_time, duration, calendar, color: col, notes, member_id, recurring_rule }, seriesId);
 
-  res.json({ id: seriesId, title: title.trim(), date, time: time||'All day', end_time: end_time||'', calendar: calendar||'kith', color: col, member_id: member_id||null, recurring_rule: rule });
+  res.json({ id: seriesId, title: title.trim(), date, time: time||'All day', end_time: end_time||'', calendar: calendar||'kith', color: col, member_id: member_id||null, recurring_rule: recurring_rule||'' });
 });
 
 app.put('/api/events/:id', requireAuth, (req, res) => {
@@ -561,20 +601,36 @@ app.put('/api/events/:id', requireAuth, (req, res) => {
   const { title, date, time, end_time, duration, calendar, color, notes, member_id, recurring_rule } = req.body;
   const calColors = { personal:'#007AFF', work:'#5856D6', family:'#32ADE6', kith:'#34C759' };
   const col = color || calColors[calendar] || existing.color;
+  const merged = {
+    title: title?.trim() || existing.title,
+    date: date || existing.date,
+    time: time !== undefined ? (normalizeTime(time) || 'All day') : existing.time,
+    end_time: end_time !== undefined ? end_time : existing.end_time,
+    duration: duration || existing.duration,
+    calendar: calendar || existing.calendar,
+    color: col,
+    notes: notes !== undefined ? notes : existing.notes,
+    member_id: member_id !== undefined ? (member_id || null) : existing.member_id,
+    recurring_rule: recurring_rule !== undefined ? recurring_rule : existing.recurring_rule,
+  };
   db.prepare('UPDATE events SET title=?,date=?,time=?,end_time=?,duration=?,calendar=?,color=?,notes=?,member_id=?,recurring_rule=? WHERE id=?')
-    .run(
-      title?.trim() || existing.title,
-      date || existing.date,
-      time !== undefined ? (normalizeTime(time) || 'All day') : existing.time,
-      end_time !== undefined ? end_time : existing.end_time,
-      duration || existing.duration,
-      calendar || existing.calendar,
-      col,
-      notes !== undefined ? notes : existing.notes,
-      member_id !== undefined ? (member_id || null) : existing.member_id,
-      recurring_rule !== undefined ? recurring_rule : existing.recurring_rule,
-      existing.id
-    );
+    .run(merged.title, merged.date, merged.time, merged.end_time, merged.duration, merged.calendar, merged.color, merged.notes, merged.member_id, merged.recurring_rule, existing.id);
+
+  // Regenerate occurrences on root events only (external_id null/empty) —
+  // covers a rule being added, changed, or removed, plus date/time edits
+  // cascading to the series. Real bug fixed 2026-08-08: this update used to
+  // touch only the single row, so setting Repeat on an existing one-time
+  // event silently never actually generated any recurring occurrences.
+  // Not attempted on a child occurrence row — editing one occurrence's rule
+  // isn't the right layer to rewrite the whole series from (matches how
+  // DELETE's scope=one/future/all already treats children vs. root
+  // differently, rather than introducing a new convention here).
+  if (!existing.external_id) {
+    db.prepare('DELETE FROM events WHERE external_id=?').run(String(existing.id));
+    const ins2 = db.prepare('INSERT INTO events (title,date,time,end_time,duration,calendar,color,notes,member_id,recurring_rule,source,external_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
+    generateOccurrences(ins2, merged, existing.id);
+  }
+
   res.json(db.prepare('SELECT * FROM events WHERE id=?').get(existing.id));
 });
 
@@ -1179,6 +1235,17 @@ app.get('/api/settings/webhook-secret', requireAdmin, (req, res) => {
 app.put('/api/settings/webhook-secret', requireAdmin, (req, res) => {
   const secret = req.body?.secret || require('crypto').randomBytes(24).toString('hex');
   db.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)').run('email_webhook_secret', String(secret));
+  // .kith-webhook-secret is a plain-text setup note for pasting into the
+  // Cloudflare Worker's `wrangler secret put` — it isn't read by any code
+  // here, so without this it would silently go stale on rotation and could
+  // mislead a future re-paste into the Worker, breaking the webhook auth
+  // without any visible error. Rewriting it here keeps it a live mirror.
+  try {
+    require('fs').writeFileSync(
+      path.join(__dirname, '.kith-webhook-secret'),
+      `KITH_WEBHOOK_SECRET=${secret}\n\nPaste this into Kith → Settings → Email → Webhook secret\n`
+    );
+  } catch {}
   res.json({ secret });
 });
 
@@ -1617,7 +1684,11 @@ app.put('/api/members/:id', requireAdmin, (req, res) => {
     const startYear = (localDate(new Date(today.getFullYear(), bMonth - 1, bDay)) < todayStr)
       ? today.getFullYear() + 1
       : today.getFullYear();
-    for (let y = startYear; y <= startYear + 2; y++) {
+    // 50 years, not +2 — no job re-tops these up (see generateOccurrences'
+    // comment on the same issue for the general recurring-event path), so
+    // a 3-year window meant a birthday would silently stop appearing on
+    // the calendar after 3 years with no warning to anyone.
+    for (let y = startYear; y <= startYear + 50; y++) {
       const effectiveDay = (bMonth === 2 && bDay === 29 && !isLeapYear(y)) ? 28 : bDay;
       const d = new Date(y, bMonth - 1, effectiveDay);
       ins.run(`${name}'s Birthday`, localDate(d), 'All day', color, 'birthday', m.id, 'kith', '1h', 'Annually');
@@ -5092,7 +5163,25 @@ cron.schedule('0 * * * *', () => {
 
 // ── IMAP email polling ────────────────────────────────────────────────────────
 const g = k => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value || '';
-// UID tracking — persisted in DB so server restarts don't reprocess emails
+// One-time migration: UID history was previously stored under a bare
+// 'INBOX' key. Renaming it to the new account-scoped key (below) up front
+// means the currently-configured account's own already-processed mail
+// isn't mistaken for unseen on the next boot — without this, scanImap30Days
+// running at startup would reprocess up to 30 days of already-handled mail
+// through the AI classifier. No-ops on every boot after the first, since by
+// then no rows are left under the bare 'INBOX' key to rename.
+try {
+  const curImapUser = g('imap_user');
+  if (curImapUser) db.prepare("UPDATE imap_processed_uids SET mailbox=? WHERE mailbox='INBOX'").run(`${curImapUser}:INBOX`);
+} catch {}
+// UID tracking — persisted in DB so server restarts don't reprocess emails.
+// IMAP UIDs are only unique within a single account's mailbox — if the
+// connected account is ever switched, the new account's UIDs could
+// collide with the old account's history and get silently skipped. Folding
+// the account into the `mailbox` key (rather than a bare 'INBOX') scopes
+// dedup per-account for free, using the table's existing (uid,mailbox)
+// primary key — no schema migration needed. Old rows under a previous
+// account's key are simply orphaned and age out via the 60-day prune below.
 const _uidSeen = (uid, mailbox = 'INBOX') =>
   !!db.prepare('SELECT 1 FROM imap_processed_uids WHERE uid=? AND mailbox=?').get(uid, mailbox);
 const _uidMark = (uid, mailbox = 'INBOX') => {
@@ -5190,6 +5279,7 @@ async function pollImap() {
   const { ImapFlow } = require('imapflow');
   const { simpleParser } = require('mailparser');
   const client = new ImapFlow({ host, port, secure: port === 993, auth: { user, pass }, logger: false });
+  const mbKey = `${user}:INBOX`;
 
   try {
     await client.connect();
@@ -5197,20 +5287,20 @@ async function pollImap() {
     const since = new Date(Date.now() - 48 * 60 * 60 * 1000);
     try {
       for await (const msg of client.fetch({ since }, { uid: true, source: true, envelope: true })) {
-        if (_uidSeen(msg.uid)) continue;
+        if (_uidSeen(msg.uid, mbKey)) continue;
         const subject = msg.envelope?.subject || '';
         const isDelivered = DELIVERED_RE.test(subject);
         const isPaid = !isDelivered && PAID_RE.test(subject);
         const isShipping = !isDelivered && SHIPPING_RE.test(subject);
         const isBill = !isDelivered && !isPaid && !isShipping && BILL_RE.test(subject);
         const isAppt = !isDelivered && !isPaid && !isShipping && !isBill && APPT_RE.test(subject);
-        if (!isDelivered && !isPaid && !isShipping && !isBill && !isAppt) { _uidMark(msg.uid); continue; }
+        if (!isDelivered && !isPaid && !isShipping && !isBill && !isAppt) { _uidMark(msg.uid, mbKey); continue; }
         let body = '';
         try {
           const parsed = await simpleParser(msg.source);
           body = parsed.text || (parsed.html ? stripHtml(parsed.html) : '');
         } catch {}
-        _uidMark(msg.uid); // mark before AI calls so a crash doesn't cause infinite reprocessing
+        _uidMark(msg.uid, mbKey); // mark before AI calls so a crash doesn't cause infinite reprocessing
 
         if (isDelivered) {
           const pkg = await callAiForPackage(subject, body).catch(() => null);
@@ -5304,27 +5394,33 @@ async function scanImap30Days() {
     const { ImapFlow } = require('imapflow');
     const { simpleParser } = require('mailparser');
     const client = new ImapFlow({ host, port, secure: port === 993, auth: { user, pass }, logger: false });
+    const mbKey = `${user}:INBOX`;
 
     await client.connect();
     const lock = await client.getMailboxLock('INBOX');
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const batch = [];
+    let truncated = false;
 
     try {
       for await (const msg of client.fetch({ since }, { uid: true, source: true, envelope: true })) {
-        if (_uidSeen(msg.uid)) continue;
+        if (_uidSeen(msg.uid, mbKey)) continue;
         const subject = msg.envelope?.subject || '';
         const isDelivered = DELIVERED_RE.test(subject);
         const isPaid = !isDelivered && PAID_RE.test(subject);
         const isShipping = !isDelivered && SHIPPING_RE.test(subject);
         const isBill = !isDelivered && !isPaid && !isShipping && BILL_RE.test(subject);
         const isAppt = !isDelivered && !isPaid && !isShipping && !isBill && APPT_RE.test(subject);
-        if (!isDelivered && !isPaid && !isShipping && !isBill && !isAppt) { _uidMark(msg.uid); continue; }
+        if (!isDelivered && !isPaid && !isShipping && !isBill && !isAppt) { _uidMark(msg.uid, mbKey); continue; }
         let body = '';
         try { const p = await simpleParser(msg.source); body = p.text || (p.html ? stripHtml(p.html) : ''); } catch {}
-        _uidMark(msg.uid);
+        _uidMark(msg.uid, mbKey);
         batch.push({ subject, isDelivered, isPaid, isShipping, isBill, isAppt, body });
-        if (batch.length >= 50) break;
+        // Deliberately capped so one scan can't run for hours against a large
+        // inbox — but that means a backlog past 50 matching messages is left
+        // unprocessed with no signal to the user. Surface it via `truncated`
+        // so the UI can tell them to just run the scan again to pick up more.
+        if (batch.length >= 50) { truncated = true; break; }
       }
     } finally { lock.release(); }
     try { await client.logout(); } catch {}
@@ -5376,7 +5472,8 @@ async function scanImap30Days() {
     if (summary.packages > 0) broadcastSSE('packages', { action: 'reload' });
     if (summary.bills > 0) broadcastSSE('bills', { action: 'reload' });
     if (summary.events + summary.appointments > 0) broadcastSSE('inbox', { action: 'reload' });
-    console.log(`[imap scan] done — packages:${summary.packages} bills:${summary.bills} events:${summary.events} appointments:${summary.appointments}`);
+    console.log(`[imap scan] done — packages:${summary.packages} bills:${summary.bills} events:${summary.events} appointments:${summary.appointments}${truncated ? ' (truncated at 50)' : ''}`);
+    summary.truncated = truncated;
   } catch (e) {
     console.error('[imap scan]', e?.message || e);
     broadcastSSE('scan_complete', { ...summary, error: e?.message || 'Scan failed' });

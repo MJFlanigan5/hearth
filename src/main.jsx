@@ -32,6 +32,82 @@ function daysUntil(dateStr){
   return Math.round((new Date(dateStr+'T00:00:00')-t)/86400000);
 }
 
+/* ── Recurring "Name (birthYear)" → "Name (age)" title rendering ─────────
+   Idea borrowed from Timeframe (github.com/timeframe/ha-addon) — a
+   recurring annual event titled e.g. "Ada (1990)" auto-displays as
+   "Ada (35)" using that specific occurrence's own year (so a future
+   occurrence correctly shows a higher age, not always today's age).
+   Scoped to recurring_rule==='Annually' only, so a one-time event that
+   happens to end in "(1990)" for an unrelated reason (e.g. a historical
+   note) isn't misinterpreted as a birth year. */
+function displayEventTitle(ev){
+  if(ev.recurring_rule!=='Annually') return ev.title;
+  const m=ev.title.match(/^(.*\S)\s*\((\d{4})\)\s*$/);
+  if(!m) return ev.title;
+  const occurrenceYear=parseInt((ev.date||'').slice(0,4),10);
+  if(!occurrenceYear) return ev.title;
+  const age=occurrenceYear-parseInt(m[2],10);
+  if(age<0) return ev.title;
+  return `${m[1]} (${age})`;
+}
+
+/* ── Event notes tokens — #banner and countdown:N ─────────────────────────
+   Also borrowed from Timeframe. Both are parsed out of the free-text
+   `notes` field rather than needing new DB columns/UI, matching how
+   Timeframe itself keeps these out-of-band in the description. Only
+   scanned on real, user-authored events (source manual/birthday) — /api
+   /events also returns synthetic bill/package/vehicle-service rows with
+   their own auto-generated notes (tracking numbers, "$amount", "last done
+   at X mi"), and those should never be scanned for tokens. Deliberately
+   plain-text only, no HTML formatting support unlike Timeframe's — this
+   app pulls real notes from external ICS feeds and parsed emails, and
+   rendering arbitrary HTML from that untrusted content would be a stored-
+   XSS risk that isn't worth the cosmetic upside. */
+function isTokenScannableEvent(ev){
+  return !ev.source || ev.source==='manual' || ev.source==='birthday';
+}
+function eventTimeToDate(dateStr,timeStr){
+  if(!dateStr) return null;
+  if(!timeStr||timeStr==='All day') return new Date(dateStr+'T00:00:00');
+  const m=timeStr.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if(!m) return new Date(dateStr+'T00:00:00');
+  let h=parseInt(m[1],10); const min=m[2]; const ap=m[3].toUpperCase();
+  if(ap==='PM'&&h!==12) h+=12;
+  if(ap==='AM'&&h===12) h=0;
+  return new Date(`${dateStr}T${String(h).padStart(2,'0')}:${min}:00`);
+}
+function parseDurationMs(duration){
+  if(!duration) return 3600000;
+  const h=duration.match(/^(\d+(?:\.\d+)?)\s*h/i);
+  if(h) return parseFloat(h[1])*3600000;
+  const mins=duration.match(/^(\d+)\s*m/i);
+  if(mins) return parseInt(mins[1],10)*60000;
+  return 3600000;
+}
+function eventActiveWindow(ev){
+  if(!ev.date) return null;
+  if(!ev.time||ev.time==='All day') return [new Date(ev.date+'T00:00:00'),new Date(ev.date+'T23:59:59')];
+  const start=eventTimeToDate(ev.date,ev.time);
+  if(!start) return null;
+  const end=ev.end_time?eventTimeToDate(ev.date,ev.end_time):new Date(start.getTime()+parseDurationMs(ev.duration));
+  return [start,end];
+}
+function bannerBody(ev){
+  return (ev.notes||'').replace(/(^|\n)\s*#banner\s*(\n|$)/i,'$1').trim();
+}
+function eventBannerActive(ev,now){
+  if(!isTokenScannableEvent(ev)) return false;
+  if(!/(^|\s)#banner(\s|$)/i.test(ev.notes||'')) return false;
+  const win=eventActiveWindow(ev);
+  if(!win) return false;
+  return now>=win[0]&&now<=win[1];
+}
+function eventCountdownDays(ev){
+  if(!isTokenScannableEvent(ev)) return 0;
+  const m=(ev.notes||'').match(/(?:^|\s)countdown:(\d{1,3})(?:\s|$)/i);
+  return m?parseInt(m[1],10):0;
+}
+
 /* ── API helper ──────────────────────────────────────────────────────── */
 const _authHdr=()=>{const t=localStorage.getItem('kith_token');return t?{'Authorization':`Bearer ${t}`}:{};};
 const _parseRes=r=>r.ok?r.json():r.json().catch(()=>({})).then(b=>{throw Object.assign(new Error(b?.error||`HTTP ${r.status}`),{status:r.status,body:b});});
@@ -820,20 +896,60 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
     return()=>clearInterval(id);
   },[photos.length]);
 
-  // Countdown overlay — fires once per countdown per day when it hits today
+  // Countdown overlay — fires once per countdown per day when it hits today.
+  // Also fires for events carrying a `countdown:N` notes token (Timeframe-
+  // inspired, see eventCountdownDays) on each of the N days leading up to
+  // the event — never on/after the event day itself, matching Timeframe's
+  // own stated behavior. Both share this one overlay slot; if both would
+  // fire the same moment the countdowns-table entry wins, matching this
+  // effect's original priority (checked first, same as before).
   const [countdownOverlay,setCountdownOverlay]=useState(null);
   const cdTimerRef=useRef(null);
   useEffect(()=>{
     const today=(countdowns||[]).find(c=>daysUntil(c.date)===0);
-    if(!today) return;
-    const key=`kith_cd_${today.id}_${localDate()}`;
+    if(today){
+      const key=`kith_cd_${today.id}_${localDate()}`;
+      if(!localStorage.getItem(key)){
+        localStorage.setItem(key,'1');
+        if(cdTimerRef.current) clearTimeout(cdTimerRef.current);
+        setCountdownOverlay({...today,isToday:true});
+        cdTimerRef.current=setTimeout(()=>setCountdownOverlay(null),30000);
+      }
+      return;
+    }
+    const tokenedEvent=(events||[]).find(ev=>{
+      const n=eventCountdownDays(ev);
+      if(!n) return false;
+      const d=daysUntil(ev.date);
+      return d>=1&&d<=n;
+    });
+    if(!tokenedEvent) return;
+    const key=`kith_cd_ev_${tokenedEvent.id}_${localDate()}`;
     if(localStorage.getItem(key)) return;
     localStorage.setItem(key,'1');
     if(cdTimerRef.current) clearTimeout(cdTimerRef.current);
-    setCountdownOverlay(today);
+    setCountdownOverlay({id:tokenedEvent.id,emoji:'🎉',label:`${displayEventTitle(tokenedEvent)} (in ${daysUntil(tokenedEvent.date)}d)`});
     cdTimerRef.current=setTimeout(()=>setCountdownOverlay(null),30000);
-  },[countdowns]);
+  },[countdowns,events]);
   useEffect(()=>()=>{if(cdTimerRef.current)clearTimeout(cdTimerRef.current);},[]);
+
+  // #banner — full-width alert while an event carrying the #banner token
+  // in its notes is active (its computed start→end window contains "now").
+  // Re-checked every 30s (events themselves only refresh periodically, so
+  // no need to check more often than that) — deliberately not a one-time
+  // dismissible overlay like countdownOverlay above, since Timeframe's own
+  // behavior is "shown continuously while active," not a brief pop-up.
+  const [activeBanner,setActiveBanner]=useState(null);
+  useEffect(()=>{
+    const check=()=>{
+      const now=new Date();
+      const match=(events||[]).find(ev=>eventBannerActive(ev,now));
+      setActiveBanner(match||null);
+    };
+    check();
+    const t=setInterval(check,30000);
+    return ()=>clearInterval(t);
+  },[events]);
 
   // Night mode
   const [nightDismissed,setNightDismissed]=useState(false);
@@ -990,13 +1106,25 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
 
       {/* Presence notification — bottom-right corner card */}
       {countdownOverlay&&(
-        <div onClick={()=>{if(cdTimerRef.current)clearTimeout(cdTimerRef.current);setCountdownOverlay(null);}} style={{position:'fixed',bottom:isTV?36:24,left:isTV?40:24,zIndex:999,display:'flex',alignItems:'center',gap:16,background:D.card,borderRadius:20,padding:isTV?'20px 28px':'16px 22px',border:`1.5px solid ${A.amber}55`,boxShadow:`0 0 40px ${A.amber}18,0 12px 32px rgba(0,0,0,0.35)`,animation:'presenceIn .35s cubic-bezier(.4,0,.2,1)',cursor:'pointer',maxWidth:isTV?400:320}}>
+        <div onClick={()=>{if(cdTimerRef.current)clearTimeout(cdTimerRef.current);setCountdownOverlay(null);}} style={{position:'fixed',bottom:activeBanner?(isTV?128:104):(isTV?36:24),left:isTV?40:24,zIndex:999,display:'flex',alignItems:'center',gap:16,background:D.card,borderRadius:20,padding:isTV?'20px 28px':'16px 22px',border:`1.5px solid ${A.amber}55`,boxShadow:`0 0 40px ${A.amber}18,0 12px 32px rgba(0,0,0,0.35)`,animation:'presenceIn .35s cubic-bezier(.4,0,.2,1)',cursor:'pointer',maxWidth:isTV?400:320}}>
           <div style={{width:isTV?56:44,height:isTV?56:44,borderRadius:'50%',background:`${A.amber}20`,border:`2px solid ${A.amber}`,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,fontSize:isTV?26:20}}>{countdownOverlay.emoji||'🎉'}</div>
           <div style={{flex:1,minWidth:0}}>
             <div style={{fontSize:isTV?22:17,fontWeight:800,color:D.t1,letterSpacing:'-0.01em',lineHeight:1.2}}>{countdownOverlay.label}</div>
-            <div style={{fontSize:isTV?15:12,color:A.amber,fontWeight:600,marginTop:3}}>Today!</div>
+            <div style={{fontSize:isTV?15:12,color:A.amber,fontWeight:600,marginTop:3}}>{countdownOverlay.isToday?'Today!':'Coming up'}</div>
             <PresenceBar key={countdownOverlay.id} duration={30000} color={A.amber}/>
           </div>
+        </div>
+      )}
+
+      {/* #banner — full-width, bottom of screen, shown continuously for
+          the event's whole active window (see eventBannerActive) rather
+          than a timed dismissible overlay like countdownOverlay above. */}
+      {activeBanner&&(
+        <div style={{position:'fixed',left:isTV?40:24,right:isTV?40:24,bottom:isTV?36:24,zIndex:998,background:D.card,borderRadius:20,padding:isTV?'22px 28px':'16px 22px',border:`1.5px solid ${activeBanner.color||A.amber}55`,boxShadow:`0 0 40px ${activeBanner.color||A.amber}18,0 12px 32px rgba(0,0,0,0.35)`,animation:'presenceIn .35s cubic-bezier(.4,0,.2,1)'}}>
+          <div style={{fontSize:isTV?22:17,fontWeight:800,color:D.t1,letterSpacing:'-0.01em',lineHeight:1.2}}>{displayEventTitle(activeBanner)}</div>
+          {bannerBody(activeBanner)&&(
+            <div style={{fontSize:isTV?15:13,color:D.t2,marginTop:6,lineHeight:1.4,whiteSpace:'pre-wrap'}}>{bannerBody(activeBanner)}</div>
+          )}
         </div>
       )}
       {/* Header — clock + date */}
@@ -1064,7 +1192,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
                   {evs.length===0&&<div style={{fontSize:13,color:D.t4}}>Free</div>}
                   {evs.slice(0,3).map(ev=>{const c=ev.color||'#34C759';return(
                     <div key={ev.id} style={{background:c+'18',borderRadius:8,padding:'8px 11px',marginBottom:4,borderLeft:`3px solid ${c}`}}>
-                      <div style={{fontSize:14,color:D.t1,fontWeight:600}}>{ev.title}</div>
+                      <div style={{fontSize:14,color:D.t1,fontWeight:600}}>{displayEventTitle(ev)}</div>
                       <div style={{fontSize:12,color:D.t3,fontVariantNumeric:'tabular-nums',marginTop:1}}>{fmtTime(ev.time,clockFormat)}</div>
                     </div>
                   );})}
@@ -1113,7 +1241,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
                           <div style={{fontSize:10,fontWeight:700,color:D.t3,marginBottom:6,textTransform:'uppercase',letterSpacing:'.08em'}}>{label}</div>
                           {evs.map(ev=>{const c=ev.color||'#34C759';return(
                             <div key={ev.id} style={{background:c+'18',borderRadius:8,padding:'8px 11px',marginBottom:4,borderLeft:`3px solid ${c}`}}>
-                              <div style={{fontSize:14,color:D.t1,fontWeight:600}}>{ev.title}</div>
+                              <div style={{fontSize:14,color:D.t1,fontWeight:600}}>{displayEventTitle(ev)}</div>
                               <div style={{fontSize:12,color:D.t3,fontVariantNumeric:'tabular-nums',marginTop:1}}>{fmtTime(ev.time,clockFormat)}</div>
                             </div>
                           );})}
@@ -1807,7 +1935,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
                               <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 10px',background:'rgba(255,255,255,0.06)',borderRadius:10}}>
                                 <span style={{fontSize:22,flexShrink:0}}>{ev.icon||'🏠'}</span>
                                 <div style={{flex:1,minWidth:0}}>
-                                  <div style={{fontSize:13,fontWeight:600,color:D.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{ev.title}</div>
+                                  <div style={{fontSize:13,fontWeight:600,color:D.t1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{displayEventTitle(ev)}</div>
                                   {ev.message&&<div style={{fontSize:11,color:D.t3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',marginTop:1}}>{ev.message}</div>}
                                 </div>
                                 <span style={{fontSize:10,color:D.t4,flexShrink:0,whiteSpace:'nowrap'}}>{fmtAgo(ev.created_at)}</span>
@@ -2493,7 +2621,7 @@ function DashboardScreen({events,setEvents,chores,grocery,meals,countdowns,weath
               <div key={ev.id||i} style={{display:'flex',alignItems:'center',gap:12,padding:'11px 16px',borderTop:i>0?`1px solid ${A.sep}`:'none'}}>
                 <span style={{fontSize:18,flexShrink:0}}>{ev.icon||'🏠'}</span>
                 <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontSize:14,fontWeight:600,color:A.label1}}>{ev.title}</div>
+                  <div style={{fontSize:14,fontWeight:600,color:A.label1}}>{displayEventTitle(ev)}</div>
                   {ev.message&&<div style={{fontSize:13,color:A.label4,marginTop:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{ev.message}</div>}
                 </div>
                 <span style={{fontSize:12,color:A.label5,flexShrink:0,fontVariantNumeric:'tabular-nums'}}>{agoStr}</span>
@@ -2547,7 +2675,7 @@ function DashboardScreen({events,setEvents,chores,grocery,meals,countdowns,weath
             <div key={ev.id} className="irow" style={{display:'flex',alignItems:'center',gap:12,padding:'13px 16px',borderTop:i>0?`1px solid ${A.sep}`:'none'}}>
               <div style={{width:3,height:38,borderRadius:2,background:ev.color,flexShrink:0}}/>
               <div style={{flex:1}}>
-                <div style={{fontSize:15,fontWeight:600,color:A.label1}}>{ev.title}</div>
+                <div style={{fontSize:15,fontWeight:600,color:A.label1}}>{displayEventTitle(ev)}</div>
                 <div style={{fontSize:12,color:A.label4,fontVariantNumeric:'tabular-nums',marginTop:2}}>{fmtTime(ev.time,clockFormat)}</div>
               </div>
             </div>
@@ -2856,7 +2984,7 @@ function CalendarScreen({events,setEvents,icsSources,toastAdd,members,clockForma
                 {weekDays.map(d=>(
                   <div key={d.date} style={{padding:'3px 4px',borderLeft:`1px solid ${A.sep}`,background:d.today?'rgba(0,122,255,0.02)':'transparent'}}>
                     {filteredEvents.filter(e=>e.date===d.date&&(!e.time||e.time==='All day')).map(ev=>(
-                      <div key={ev.id} onClick={()=>setSelectedEvent(ev)} style={{background:ev.color+'22',borderLeft:`2.5px solid ${ev.color}`,borderRadius:'0 6px 6px 0',padding:'3px 7px',fontSize:11,color:ev.color,fontWeight:600,cursor:'pointer',marginBottom:2,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{ev.title}</div>
+                      <div key={ev.id} onClick={()=>setSelectedEvent(ev)} style={{background:ev.color+'22',borderLeft:`2.5px solid ${ev.color}`,borderRadius:'0 6px 6px 0',padding:'3px 7px',fontSize:11,color:ev.color,fontWeight:600,cursor:'pointer',marginBottom:2,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{displayEventTitle(ev)}</div>
                     ))}
                   </div>
                 ))}
@@ -2890,7 +3018,7 @@ function CalendarScreen({events,setEvents,icsSources,toastAdd,members,clockForma
                       <div key={d.date} style={{minHeight:54,padding:'3px 4px',background:d.today?'rgba(0,122,255,0.02)':'transparent',borderLeft:`1px solid ${A.sep}`}}>
                         {evs.map(ev=>(
                           <div key={ev.id} onClick={()=>setSelectedEvent(ev)} style={{background:ev.color+'18',borderLeft:`2.5px solid ${ev.color}`,borderRadius:'0 7px 7px 0',padding:'5px 8px',fontSize:12,color:ev.color,fontWeight:600,cursor:'pointer',marginBottom:2}}>
-                            {ev.title}
+                            {displayEventTitle(ev)}
                             <div style={{fontSize:10,opacity:.7,fontVariantNumeric:'tabular-nums'}}>{fmtTime(ev.time,clockFormat)}{ev.end_time?` – ${fmtTime(ev.end_time,clockFormat)}`:''}</div>
                           </div>
                         ))}
@@ -2923,7 +3051,7 @@ function CalendarScreen({events,setEvents,icsSources,toastAdd,members,clockForma
               <div key={i} style={{background:A.cardBg,minHeight:76,padding:'4px 5px'}}>
                 <div style={{width:24,height:24,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',marginBottom:3,background:isToday?A.blue:'transparent',fontSize:13,fontWeight:isToday?700:400,color:isToday?'#fff':A.label1}}>{d}</div>
                 {dayEvs.slice(0,3).map(ev=>(
-                  <div key={ev.id} onClick={()=>setSelectedEvent(ev)} style={{background:ev.color+'18',borderLeft:`2px solid ${ev.color}`,borderRadius:'0 4px 4px 0',padding:'2px 5px',fontSize:11,color:ev.color,fontWeight:600,marginBottom:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',cursor:'pointer'}}>{ev.title}</div>
+                  <div key={ev.id} onClick={()=>setSelectedEvent(ev)} style={{background:ev.color+'18',borderLeft:`2px solid ${ev.color}`,borderRadius:'0 4px 4px 0',padding:'2px 5px',fontSize:11,color:ev.color,fontWeight:600,marginBottom:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',cursor:'pointer'}}>{displayEventTitle(ev)}</div>
                 ))}
                 {dayEvs.length>3&&<div style={{fontSize:10,color:A.label5,paddingLeft:4}}>+{dayEvs.length-3} more</div>}
               </div>
@@ -2957,7 +3085,7 @@ function CalendarScreen({events,setEvents,icsSources,toastAdd,members,clockForma
                     onMouseLeave={e=>e.currentTarget.style.background=A.cardBg}
                   >
                     <div style={{flex:1}}>
-                      <div style={{fontSize:14,fontWeight:600,color:A.label1}}>{ev.title}</div>
+                      <div style={{fontSize:14,fontWeight:600,color:A.label1}}>{displayEventTitle(ev)}</div>
                       <div style={{fontSize:12,color:A.label4,fontVariantNumeric:'tabular-nums',marginTop:2}}>{ev.time==='All day'?'All day':`${fmtTime(ev.time,clockFormat)}${ev.end_time?` – ${fmtTime(ev.end_time,clockFormat)}`:''}`}</div>
                       {ev.recurring_rule&&<div style={{fontSize:11,color:A.purple,marginTop:2}}>↻ {ev.recurring_rule}</div>}
                     </div>
@@ -3004,7 +3132,7 @@ function CalendarScreen({events,setEvents,icsSources,toastAdd,members,clockForma
                 <div style={{width:10,height:10,borderRadius:3,background:calMap[selectedEvent.calendar]||A.blue,flexShrink:0}}/>
                 <span style={{fontSize:13,color:A.label4,fontWeight:500}}>{calLabels[selectedEvent.calendar]||selectedEvent.calendar}</span>
               </div>
-              <div style={{fontSize:19,fontWeight:700,color:A.label1,marginBottom:10,letterSpacing:'-.01em'}}>{selectedEvent.title}</div>
+              <div style={{fontSize:19,fontWeight:700,color:A.label1,marginBottom:10,letterSpacing:'-.01em'}}>{displayEventTitle(selectedEvent)}</div>
               <div style={{fontSize:14,color:A.label3,marginBottom:4}}>{selectedEvent.date}</div>
               <div style={{fontSize:14,color:A.label3,fontVariantNumeric:'tabular-nums',marginBottom:selectedEvent.notes?12:0}}>
                 {selectedEvent.time==='All day'?'All day':`${fmtTime(selectedEvent.time,clockFormat)}${selectedEvent.end_time?` – ${fmtTime(selectedEvent.end_time,clockFormat)}`:''}`}
@@ -3144,7 +3272,7 @@ function CalendarScreen({events,setEvents,icsSources,toastAdd,members,clockForma
               <div style={{width:10,height:10,borderRadius:3,background:calMap[selectedEvent.calendar]||A.blue,flexShrink:0}}/>
               <span style={{fontSize:13,color:A.label4,fontWeight:500}}>{calLabels[selectedEvent.calendar]||selectedEvent.calendar}</span>
             </div>
-            <div style={{fontSize:19,fontWeight:700,color:A.label1,marginBottom:10,letterSpacing:'-.01em'}}>{selectedEvent.title}</div>
+            <div style={{fontSize:19,fontWeight:700,color:A.label1,marginBottom:10,letterSpacing:'-.01em'}}>{displayEventTitle(selectedEvent)}</div>
             <div style={{fontSize:14,color:A.label3,marginBottom:4}}>{selectedEvent.date}</div>
             <div style={{fontSize:14,color:A.label3,fontVariantNumeric:'tabular-nums',marginBottom:selectedEvent.recurring_rule||selectedEvent.notes?12:0}}>
               {selectedEvent.time==='All day'?'All day':`${fmtTime(selectedEvent.time,clockFormat)}${selectedEvent.end_time?` – ${fmtTime(selectedEvent.end_time,clockFormat)}`:''}`}
@@ -4772,7 +4900,8 @@ function SettingsScreen({toastAdd,icsSources,setIcsSources,onDisplay,photos,setP
                       if(d.bills>0) parts.push(`${d.bills} bill${d.bills===1?'':'s'}`);
                       if(d.appointments>0) parts.push(`${d.appointments} appointment${d.appointments===1?'':'s'}`);
                       if(d.events>0) parts.push(`${d.events} event${d.events===1?'':'s'}`);
-                      toastAdd(parts.length?`Scan found: ${parts.join(', ')}`:'Scan complete — nothing new found');
+                      const found=parts.length?`Scan found: ${parts.join(', ')}`:'Scan complete — nothing new found';
+                      toastAdd(d.truncated?`${found} — more than 50 matched, run again to catch the rest`:found);
                     }catch{toastAdd('Scan complete');}
                   });
                 }}>{imapScanning?'Scanning…':'Scan last 30 days'}</Btn>
