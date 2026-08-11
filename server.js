@@ -1504,9 +1504,10 @@ async function sendHomeReminders() {
   const subs = db.prepare('SELECT * FROM push_subscriptions').all();
   if (!subs.length) return;
   const items = [];
-  for (const c of db.prepare('SELECT * FROM home_consumables').all().map(computeConsumable)) {
+  const consumablesNow = await Promise.all(db.prepare('SELECT * FROM home_consumables').all().map(computeConsumableLive));
+  for (const c of consumablesNow) {
     if (c.status === 'overdue' || c.status === 'due_soon')
-      items.push(c.days_remaining < 0 ? `${c.name} (${Math.abs(c.days_remaining)}d overdue)` : `${c.name} (due soon)`);
+      items.push(c.ha_entity_id ? `${c.name} (${c.ha_pct}% left)` : c.days_remaining < 0 ? `${c.name} (${Math.abs(c.days_remaining)}d overdue)` : `${c.name} (due soon)`);
   }
   for (const m of db.prepare('SELECT * FROM home_maintenance').all().map(computeMaintenance)) {
     if (m.status === 'overdue') items.push(`${m.name} (overdue)`);
@@ -3832,6 +3833,34 @@ function computeConsumable(item) {
   return { ...item, next_due: nextStr, days_remaining: days, status: days < 0 ? 'overdue' : days <= 7 ? 'due_soon' : 'ok' };
 }
 
+async function haGetState(entityId) {
+  const haUrl = (gs('ha_url') || '').replace(/\/$/, '');
+  const haToken = gs('ha_token') || '';
+  if (!entityId || !haUrl || !haToken) return null;
+  const r = await fetch(`${haUrl}/api/states/${entityId}`, {
+    headers: { 'Authorization': `Bearer ${haToken}`, 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!r.ok) throw new Error(`HA ${r.status} for ${entityId}`);
+  return r.json();
+}
+
+// If ha_entity_id is set, that live sensor (assumed 0-100% life remaining)
+// drives status instead of the interval_days countdown. Falls back to the
+// date-based calc if the fetch fails or the entity has no numeric state.
+async function computeConsumableLive(item) {
+  if (!item.ha_entity_id) return computeConsumable(item);
+  try {
+    const s = await haGetState(item.ha_entity_id);
+    const pct = parseFloat(s?.state);
+    if (isNaN(pct)) return computeConsumable(item);
+    const status = pct <= 0 ? 'overdue' : pct <= 15 ? 'due_soon' : 'ok';
+    return { ...item, next_due: null, ha_pct: pct, days_remaining: status === 'overdue' ? -1 : status === 'due_soon' ? 7 : 999, status };
+  } catch {
+    return computeConsumable(item);
+  }
+}
+
 app.get('/api/home/appliances', requireAuth, (req, res) => {
   const rows = db.prepare('SELECT * FROM home_appliances ORDER BY CASE WHEN warranty_date=\'\' THEN 1 ELSE 0 END, warranty_date, name').all();
   res.json(rows);
@@ -3858,8 +3887,8 @@ app.delete('/api/home/appliances/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/home/consumables', requireAuth, (req, res) => {
-  const rows = db.prepare('SELECT * FROM home_consumables').all().map(computeConsumable);
+app.get('/api/home/consumables', requireAuth, async (req, res) => {
+  const rows = await Promise.all(db.prepare('SELECT * FROM home_consumables').all().map(computeConsumableLive));
   rows.sort((a, b) => {
     if (a.days_remaining === null && b.days_remaining === null) return 0;
     if (a.days_remaining === null) return 1;
@@ -3869,23 +3898,23 @@ app.get('/api/home/consumables', requireAuth, (req, res) => {
   res.json(rows);
 });
 
-app.post('/api/home/consumables', requireAdmin, (req, res) => {
-  const { name, location='', interval_days, last_replaced='', notes='' } = req.body || {};
+app.post('/api/home/consumables', requireAdmin, async (req, res) => {
+  const { name, location='', interval_days, last_replaced='', notes='', ha_entity_id='' } = req.body || {};
   if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
-  if (!interval_days || Number(interval_days) < 1) return res.status(400).json({ error: 'interval_days must be at least 1' });
-  const r = db.prepare('INSERT INTO home_consumables (name,location,interval_days,last_replaced,notes) VALUES (?,?,?,?,?)').run(name.trim(), location, Number(interval_days), last_replaced, notes);
-  res.json(computeConsumable(db.prepare('SELECT * FROM home_consumables WHERE id=?').get(r.lastInsertRowid)));
+  if (!ha_entity_id && (!interval_days || Number(interval_days) < 1)) return res.status(400).json({ error: 'interval_days must be at least 1' });
+  const r = db.prepare('INSERT INTO home_consumables (name,location,interval_days,last_replaced,notes,ha_entity_id) VALUES (?,?,?,?,?,?)').run(name.trim(), location, Number(interval_days)||90, last_replaced, notes, ha_entity_id.trim());
+  res.json(await computeConsumableLive(db.prepare('SELECT * FROM home_consumables WHERE id=?').get(r.lastInsertRowid)));
 });
 
-app.put('/api/home/consumables/:id', requireAdmin, (req, res) => {
+app.put('/api/home/consumables/:id', requireAdmin, async (req, res) => {
   const c = db.prepare('SELECT * FROM home_consumables WHERE id=?').get(Number(req.params.id));
   if (!c) return res.status(404).json({ error: 'Not found' });
-  const { name, location, interval_days, last_replaced, notes } = req.body || {};
+  const { name, location, interval_days, last_replaced, notes, ha_entity_id } = req.body || {};
   if (interval_days != null && (isNaN(Number(interval_days)) || Number(interval_days) < 1))
     return res.status(400).json({ error: 'interval_days must be a positive number' });
-  db.prepare('UPDATE home_consumables SET name=?,location=?,interval_days=?,last_replaced=?,notes=? WHERE id=?')
-    .run(name?.trim() || c.name, location ?? c.location, interval_days != null ? Number(interval_days) : c.interval_days, last_replaced ?? c.last_replaced, notes ?? c.notes, c.id);
-  res.json(computeConsumable(db.prepare('SELECT * FROM home_consumables WHERE id=?').get(c.id)));
+  db.prepare('UPDATE home_consumables SET name=?,location=?,interval_days=?,last_replaced=?,notes=?,ha_entity_id=? WHERE id=?')
+    .run(name?.trim() || c.name, location ?? c.location, interval_days != null ? Number(interval_days) : c.interval_days, last_replaced ?? c.last_replaced, notes ?? c.notes, ha_entity_id != null ? ha_entity_id.trim() : c.ha_entity_id, c.id);
+  res.json(await computeConsumableLive(db.prepare('SELECT * FROM home_consumables WHERE id=?').get(c.id)));
 });
 
 app.delete('/api/home/consumables/:id', requireAdmin, (req, res) => {
@@ -3893,11 +3922,11 @@ app.delete('/api/home/consumables/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/home/consumables/:id/replaced', requireAdmin, (req, res) => {
+app.post('/api/home/consumables/:id/replaced', requireAdmin, async (req, res) => {
   const c = db.prepare('SELECT * FROM home_consumables WHERE id=?').get(Number(req.params.id));
   if (!c) return res.status(404).json({ error: 'Not found' });
   db.prepare('UPDATE home_consumables SET last_replaced=? WHERE id=?').run(localDate(), c.id);
-  res.json(computeConsumable(db.prepare('SELECT * FROM home_consumables WHERE id=?').get(c.id)));
+  res.json(await computeConsumableLive(db.prepare('SELECT * FROM home_consumables WHERE id=?').get(c.id)));
 });
 
 // ── Home: Maintenance ─────────────────────────────────────────────────────────

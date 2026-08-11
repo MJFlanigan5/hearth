@@ -313,8 +313,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS home_consumables (
   interval_days INTEGER NOT NULL DEFAULT 90,
   last_replaced TEXT DEFAULT '',
   notes TEXT DEFAULT '',
+  ha_entity_id TEXT DEFAULT '',
   created_at TEXT DEFAULT (datetime('now'))
 )`)
+try { db.exec("ALTER TABLE home_consumables ADD COLUMN ha_entity_id TEXT DEFAULT ''"); } catch {}
 db.exec(`CREATE TABLE IF NOT EXISTS home_maintenance (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,

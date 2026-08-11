@@ -7927,7 +7927,7 @@ function HomeScreen({appliances,setAppliances,consumables,setConsumables,mainten
     {name:'Dryer vent cleaning',interval_days:365},
     {name:'HVAC service',interval_days:365},
   ];
-  const blankC={name:'',location:'',intervalVal:'90',intervalUnit:'days',last_replaced:'',notes:''};
+  const blankC={name:'',location:'',intervalVal:'90',intervalUnit:'days',last_replaced:'',notes:'',ha_entity_id:''};
   const [cDrawer,setCDrawer]=useState(false);
   const [editCons,setEditCons]=useState(null);
   const [cForm,setCForm]=useState(blankC);
@@ -7956,7 +7956,7 @@ function HomeScreen({appliances,setAppliances,consumables,setConsumables,mainten
   const openEditCons=c=>{
     setEditCons(c);
     const {intervalVal,intervalUnit}=intervalFromDays(c.interval_days);
-    setCForm({name:c.name,location:c.location||'',intervalVal,intervalUnit,last_replaced:c.last_replaced||'',notes:c.notes||''});
+    setCForm({name:c.name,location:c.location||'',intervalVal,intervalUnit,last_replaced:c.last_replaced||'',notes:c.notes||'',ha_entity_id:c.ha_entity_id||''});
     setCDrawer(true);
   };
 
@@ -7964,7 +7964,7 @@ function HomeScreen({appliances,setAppliances,consumables,setConsumables,mainten
     if(!cForm.name.trim()){toastAdd('Name required','red');return;}
     const days=intervalDays(cForm);
     if(days<1){toastAdd('Interval must be at least 1 day','red');return;}
-    const body={name:cForm.name.trim(),location:cForm.location,interval_days:days,last_replaced:cForm.last_replaced,notes:cForm.notes};
+    const body={name:cForm.name.trim(),location:cForm.location,interval_days:days,last_replaced:cForm.last_replaced,notes:cForm.notes,ha_entity_id:cForm.ha_entity_id.trim()};
     if(editCons){
       const r=await api.put(`/api/home/consumables/${editCons.id}`,body).catch(()=>null);
       if(!r?.id){toastAdd('Failed to save','red');return;}
@@ -8011,6 +8011,7 @@ function HomeScreen({appliances,setAppliances,consumables,setConsumables,mainten
     return A.green;
   };
   const dueLabel=c=>{
+    if(c.ha_entity_id&&c.ha_pct!=null) return c.status==='overdue'?'Replace now — 0% left':`${c.ha_pct}% remaining`;
     if(c.days_remaining===null) return 'No date set';
     if(c.days_remaining<0) return `Overdue by ${Math.abs(c.days_remaining)} day${Math.abs(c.days_remaining)===1?'':'s'}`;
     if(c.days_remaining===0) return 'Due today';
@@ -8153,6 +8154,12 @@ function HomeScreen({appliances,setAppliances,consumables,setConsumables,mainten
         </FormGroup>
         <FormGroup label="Last replaced (optional)"><div style={{padding:'12px 16px'}}><Inp type="date" value={cForm.last_replaced} onChange={e=>setCForm(f=>({...f,last_replaced:e.target.value}))}/></div></FormGroup>
         <FormGroup label="Notes (optional)"><div style={{padding:'12px 16px'}}><Inp value={cForm.notes} onChange={e=>setCForm(f=>({...f,notes:e.target.value}))} placeholder="Brand, size, etc."/></div></FormGroup>
+        <FormGroup label="HA sensor (optional)">
+          <div style={{padding:'12px 16px'}}>
+            <Inp value={cForm.ha_entity_id} onChange={e=>setCForm(f=>({...f,ha_entity_id:e.target.value}))} placeholder="sensor.kitchen_air_purifier_filter_life"/>
+            <div style={{fontSize:12,color:A.label4,marginTop:6}}>If set, this sensor's live % (0-100 life remaining) drives the status instead of the replace-every interval above.</div>
+          </div>
+        </FormGroup>
         <div style={{display:'flex',gap:8,marginTop:4}}>
           <Btn onClick={saveCons} full>{editCons?'Save Changes':'Add Item'}</Btn>
           {editCons&&<Btn variant="ghost" onClick={()=>delCons(editCons.id)} full style={{color:A.red}}>Delete</Btn>}
