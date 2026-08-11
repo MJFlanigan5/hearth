@@ -4041,6 +4041,7 @@ function GroceryScreen({grocery,setGrocery,meals,setMeals,recipes=[],toastAdd}){
   const [recipeSearch,setRecipeSearch]=useState('');
   const [fromMealsLoading,setFromMealsLoading]=useState(false);
   const [aiMealLoading,setAiMealLoading]=useState(false);
+  const [mealSuggestions,setMealSuggestions]=useState(null);
   const [dietaryProfile,setDietaryProfile]=useState({goal:'',restrictions:''});
 
   useEffect(()=>{window.__groceryRemoveTimers=removeTimers.current;return()=>{window.__groceryRemoveTimers=null;Object.values(removeTimers.current).forEach(clearTimeout);};},[]);
@@ -4213,18 +4214,28 @@ function GroceryScreen({grocery,setGrocery,meals,setMeals,recipes=[],toastAdd}){
               const r=await api.post('/api/meals/suggest',{});
               if(r?.error){toastAdd(r.error||'AI unavailable','red');}
               else if(Array.isArray(r?.meals)){
-                const DAY_DATES={Monday:0,Tuesday:1,Wednesday:2,Thursday:3,Friday:4,Saturday:5,Sunday:6};
                 const DAY_ABBR={Monday:'Mon',Tuesday:'Tue',Wednesday:'Wed',Thursday:'Thu',Friday:'Fri',Saturday:'Sat',Sunday:'Sun'};
-                for(const m of r.meals){
-                  const abbr=DAY_ABBR[m.day]||m.day;
-                  const mr=await api.put(`/api/meals/${abbr}`,{meal:m.meal,breakfast:'',lunch:''}).catch(()=>null);
-                  if(!mr?.error) setMeals(p=>p.map(mx=>mx.day===abbr?{...mx,meal:m.meal}:mx));
-                }
-                toastAdd('Week planned!','green');
+                const suggestions={};
+                for(const m of r.meals){suggestions[DAY_ABBR[m.day]||m.day]=m.meal;}
+                setMealSuggestions(suggestions);
+                toastAdd('Suggestions ready — review below','blue');
               }
             }catch{toastAdd('AI unavailable','red');}
             setAiMealLoading(false);
           }} disabled={aiMealLoading} style={{fontSize:12,color:aiMealLoading?A.label5:A.indigo,background:'none',border:'none',cursor:aiMealLoading?'default':'pointer',fontWeight:500,flexShrink:0}}>{aiMealLoading?'Planning…':'Suggest week'}</button>
+          {mealSuggestions&&(
+            <>
+              <button onClick={async()=>{
+                for(const [day,meal] of Object.entries(mealSuggestions)){
+                  const mr=await api.put(`/api/meals/${day}`,{meal,breakfast:'',lunch:''}).catch(()=>null);
+                  if(!mr?.error) setMeals(p=>p.map(mx=>mx.day===day?{...mx,meal}:mx));
+                }
+                setMealSuggestions(null);
+                toastAdd('Week planned!','green');
+              }} style={{fontSize:12,color:A.green,background:'none',border:'none',cursor:'pointer',fontWeight:600,flexShrink:0}}>Apply</button>
+              <button onClick={()=>{setMealSuggestions(null);toastAdd('Suggestions discarded','blue');}} style={{fontSize:12,color:A.label4,background:'none',border:'none',cursor:'pointer',fontWeight:500,flexShrink:0}}>Discard</button>
+            </>
+          )}
           <button onClick={async()=>{
             setFromMealsLoading(true);
             try{
@@ -4268,7 +4279,8 @@ function GroceryScreen({grocery,setGrocery,meals,setMeals,recipes=[],toastAdd}){
                       const linkedRecipeId=recipeIdFor(field);
                       const linkedRecipe=linkedRecipeId?(recipes||[]).find(r=>r.id===linkedRecipeId):null;
                       return(
-                        <div key={field} style={{display:'flex',alignItems:'center',gap:6}}>
+                        <React.Fragment key={field}>
+                        <div style={{display:'flex',alignItems:'center',gap:6}}>
                           <span style={{fontSize:10,fontWeight:700,color:A.label5,width:12,flexShrink:0}}>{lbl}</span>
                           {isEditing?(
                             <>
@@ -4291,6 +4303,10 @@ function GroceryScreen({grocery,setGrocery,meals,setMeals,recipes=[],toastAdd}){
                             </>
                           )}
                         </div>
+                        {field==='dinner'&&mealSuggestions?.[m.day]&&(
+                          <div style={{fontSize:12,color:A.indigo,fontStyle:'italic',paddingLeft:18}}>AI suggests: {mealSuggestions[m.day]}</div>
+                        )}
+                        </React.Fragment>
                       );
                     })}
                   </div>
