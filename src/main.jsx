@@ -9208,6 +9208,29 @@ function ClaudeInboxScreen({claudeInbox,setClaudeInbox,toastAdd}){
   );
 }
 
+function parseCsv(text){
+  const rows=[];
+  let row=[],field='',inQuotes=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(inQuotes){
+      if(c==='"'){ if(text[i+1]==='"'){field+='"';i++;} else inQuotes=false; }
+      else field+=c;
+    }else{
+      if(c==='"') inQuotes=true;
+      else if(c===','){ row.push(field); field=''; }
+      else if(c==='\n'||c==='\r'){
+        if(c==='\r'&&text[i+1]==='\n') i++;
+        row.push(field); field='';
+        if(row.length>1||row[0]!=='') rows.push(row);
+        row=[];
+      }else field+=c;
+    }
+  }
+  if(field||row.length){ row.push(field); rows.push(row); }
+  return rows;
+}
+
 function PantryScreen({pantry,setPantry,grocery,setGrocery,toastAdd}){
   const isMobile=useIsMobile();
   const LOCATIONS=['Fridge','Freezer','Pantry','Cabinet','Other'];
@@ -9219,6 +9242,31 @@ function PantryScreen({pantry,setPantry,grocery,setGrocery,toastAdd}){
   const [form,setForm]=useState(blank);
   const [useTarget,setUseTarget]=useState(null);
   const [useAmount,setUseAmount]=useState('1');
+  const [csvLoading,setCsvLoading]=useState(false);
+  const csvInputRef=useRef();
+  const importCsv=async e=>{
+    const file=e.target.files?.[0];
+    e.target.value='';
+    if(!file) return;
+    setCsvLoading(true);
+    try{
+      const text=await file.text();
+      const rows=parseCsv(text).filter(r=>r.some(v=>v.trim()!==''));
+      if(rows.length<2){toastAdd('CSV has no data rows','red');setCsvLoading(false);return;}
+      const headers=rows[0].map(h=>h.trim().toLowerCase());
+      const items=rows.slice(1).map(r=>{
+        const o={};
+        headers.forEach((h,i)=>{o[h]=(r[i]||'').trim();});
+        return o;
+      });
+      const r=await api.post('/api/pantry/import',{items}).catch(()=>null);
+      if(!r){toastAdd('Import failed','red');setCsvLoading(false);return;}
+      const fresh=await api.get('/api/pantry').catch(()=>null);
+      if(Array.isArray(fresh)) setPantry(fresh);
+      toastAdd(`Imported ${r.added} item${r.added!==1?'s':''}${r.skipped?`, skipped ${r.skipped}`:''}`,'green');
+    }catch{toastAdd('Import failed','red');}
+    setCsvLoading(false);
+  };
   const isLow=p=>p.low_stock_at>0&&Number(p.quantity)<=Number(p.low_stock_at);
   const expBadge=p=>{
     if(p.expiry_status==='expired') return{label:'Expired',color:A.red,bg:A.redFill};
@@ -9272,6 +9320,8 @@ function PantryScreen({pantry,setPantry,grocery,setGrocery,toastAdd}){
       <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:24}}>
         <h1 style={{fontSize:isMobile?34:44,fontWeight:800,letterSpacing:'-.05em',lineHeight:1.05}}>Pantry</h1>
         <div style={{display:'flex',gap:8}}>
+          <input ref={csvInputRef} type="file" accept=".csv,text/csv" onChange={importCsv} style={{display:'none'}}/>
+          <Btn variant="ghost" onClick={()=>csvInputRef.current?.click()} disabled={csvLoading}>{csvLoading?'Importing…':'+ CSV'}</Btn>
           <Btn variant="ghost" onClick={()=>setPhotoDrawer(true)}>+ Photo</Btn>
           <Btn onClick={openNew}>+ Add</Btn>
         </div>

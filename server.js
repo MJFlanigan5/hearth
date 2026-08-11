@@ -4684,6 +4684,20 @@ app.post('/api/pantry', requireAuth, (req, res) => {
     .run(name.trim(), location, Number(quantity)||0, unit, expires_on, Number(low_stock_at)||0, category);
   res.json(_pantryEnrich(db.prepare('SELECT * FROM pantry_items WHERE id=?').get(r.lastInsertRowid)));
 });
+app.post('/api/pantry/import', requireAuth, (req, res) => {
+  const rows = Array.isArray(req.body?.items) ? req.body.items : [];
+  const ins = db.prepare('INSERT INTO pantry_items (name,location,quantity,unit,expires_on,low_stock_at,category) VALUES (?,?,?,?,?,?,?)');
+  let added = 0, skipped = 0;
+  db.transaction(() => {
+    for (const row of rows) {
+      const name = (row?.name || '').trim();
+      if (!name) { skipped++; continue; }
+      ins.run(name, row.location || 'Pantry', Number(row.quantity) || 0, row.unit || '', row.expires_on || '', Number(row.low_stock_at) || 0, row.category || 'Other');
+      added++;
+    }
+  })();
+  res.json({ added, skipped });
+});
 app.post('/api/pantry/photo-parse', requireAuth, async (req, res) => {
   const { images, mimeType } = req.body || {};
   if (!Array.isArray(images) || !images.length) return res.status(400).json({ error: 'images array required' });
