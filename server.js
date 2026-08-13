@@ -5232,8 +5232,29 @@ const _uidMark = (uid, mailbox = 'INBOX') => {
 };
 function stripHtml(html) { return html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi,'').replace(/<style[^>]*>[\s\S]*?<\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim(); }
 
+// Carrier detection from tracking-number format — same technique aggregator apps
+// (Shop, PayPal's own tracker, 17Track) use to fill in a carrier the email text
+// itself never names (common with marketplace/3rd-party-seller shipping emails).
+// Only ever fills a gap; never overrides a carrier the AI already read from the email.
+const TRACKING_CARRIER_PATTERNS = [
+  { carrier: 'UPS',    re: /^1Z[0-9A-Z]{16}$/i },
+  { carrier: 'Amazon', re: /^TBA\d{12}$/i },
+  { carrier: 'USPS',   re: /^(94|93|92|95)\d{20}$/ },
+  { carrier: 'USPS',   re: /^[A-Z]{2}\d{9}US$/i },
+  { carrier: 'OnTrac', re: /^[CD]\d{14}$/i },
+  { carrier: 'DHL',    re: /^\d{10,11}$/ },
+  { carrier: 'FedEx',  re: /^\d{12}$|^\d{15}$|^\d{20}$/ },
+];
+function detectCarrierFromTracking(trackingNumber) {
+  if (!trackingNumber) return '';
+  const t = trackingNumber.trim();
+  const match = TRACKING_CARRIER_PATTERNS.find(p => p.re.test(t));
+  return match ? match.carrier : '';
+}
+
 // Dedup helpers — called from webhook, pollImap, and scanImap30Days
 function upsertPackage(pkg, subject) {
+  const carrier = (pkg.carrier && pkg.carrier !== 'other') ? pkg.carrier : (detectCarrierFromTracking(pkg.tracking_number) || pkg.carrier || '');
   if (pkg.tracking_number) {
     const byTracking = db.prepare('SELECT id FROM packages WHERE tracking_number=?').get(pkg.tracking_number);
     if (byTracking) return false;
@@ -5241,7 +5262,7 @@ function upsertPackage(pkg, subject) {
     const bySubject = db.prepare('SELECT id FROM packages WHERE source_subject=? AND (tracking_number IS NULL OR tracking_number="")').get(subject);
     if (bySubject) {
       db.prepare('UPDATE packages SET tracking_number=?,carrier=?,expected_date=? WHERE id=?')
-        .run(pkg.tracking_number, pkg.carrier || '', pkg.expected_date || '', bySubject.id);
+        .run(pkg.tracking_number, carrier, pkg.expected_date || '', bySubject.id);
       broadcastSSE('packages', { action: 'reload' });
       return false; // updated, not inserted
     }
@@ -5249,7 +5270,7 @@ function upsertPackage(pkg, subject) {
     if (db.prepare('SELECT id FROM packages WHERE source_subject=?').get(subject)) return false;
   }
   db.prepare('INSERT INTO packages (carrier,tracking_number,description,expected_date,source_subject) VALUES (?,?,?,?,?)')
-    .run(pkg.carrier || '', pkg.tracking_number || '', pkg.description || subject, pkg.expected_date || '', subject);
+    .run(carrier, pkg.tracking_number || '', pkg.description || subject, pkg.expected_date || '', subject);
   broadcastSSE('packages', { action: 'reload' });
   return true;
 }
