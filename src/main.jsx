@@ -1061,6 +1061,11 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
   // you can't wait for the carousel to cycle to it. It's reachable instantly
   // via a persistent button instead (see emergencyForced below).
   const [emergencyForced,setEmergencyForced]=useState(false);
+  // Safety: if emergency info gets cleared (Settings) while forced-view is
+  // active, both the panel content and the close button are gated on
+  // emergencyHasValue and would vanish together, leaving the display stuck
+  // on a blank panel with no way back. Auto-release the force in that case.
+  useEffect(()=>{if(emergencyForced&&!emergencyHasValue)setEmergencyForced(false);},[emergencyHasValue,emergencyForced]);
   const activePanelId=emergencyForced?'w_emergency':centerPanels[centerIdx%Math.max(1,centerPanels.length)];
   useEffect(()=>{
     if(panelFirstRender.current){panelFirstRender.current=false;setVisiblePanelId(activePanelId);return;}
