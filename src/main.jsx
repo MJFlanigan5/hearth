@@ -2413,24 +2413,6 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
                   <div style={{fontSize:14,color:D.t1,fontWeight:600,lineHeight:1.3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{emergencyFilled[emergencyChipIdx%emergencyFilled.length]?.[1]}</div>
                 </Widget>
               )}
-              {/* Media — music/sports, moved out of the bottom ticker into an
-                  always-visible rotating banner (single line, like the old
-                  ticker segment). Appears only when something's actually
-                  playing/live, rotates through items every 4s. */}
-              {mediaItems.length>0&&(
-                <Widget style={{flexShrink:0,padding:'10px 14px'}}>
-                  <div style={{display:'flex',alignItems:'center',gap:8,overflow:'hidden'}}>
-                    {mediaItems[mediaChipIdx%mediaItems.length].type==='music'?(
-                      mediaItems[mediaChipIdx%mediaItems.length].thumb?<img src={mediaItems[mediaChipIdx%mediaItems.length].thumb} style={{width:14,height:14,borderRadius:2,objectFit:'cover',flexShrink:0}}/>:<svg width="12" height="12" viewBox="0 0 24 24" fill={A.amber} style={{flexShrink:0}}><path d="M12 3v10.55A4 4 0 1014 17V7h4V3h-6z"/></svg>
-                    ):(
-                      <div style={{width:6,height:6,borderRadius:'50%',background:A.red,animation:'pulse 1.2s ease infinite',flexShrink:0}}/>
-                    )}
-                    <span style={{fontSize:14,color:mediaItems[mediaChipIdx%mediaItems.length].type==='music'?A.amber:D.t1,fontWeight:600,fontVariantNumeric:'tabular-nums',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                      {mediaItems[mediaChipIdx%mediaItems.length].primary}{mediaItems[mediaChipIdx%mediaItems.length].secondary?` · ${mediaItems[mediaChipIdx%mediaItems.length].secondary}`:''}
-                    </span>
-                  </div>
-                </Widget>
-              )}
               {/* Grocery — if items exist */}
               {(()=>{const unchecked=(grocery||[]).filter(g=>!g.checked);return unchecked.length>0&&(
                 <Widget style={{flexShrink:0}}>
@@ -2497,9 +2479,22 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
               </span>
             </>
           )}
-          {voiceTimer.active&&(
+          {mediaItems.length>0&&(
             <>
               {(urgentTickerItems.length>0||news.length>0||allSmartEvents.length>0)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
+              {mediaItems[mediaChipIdx%mediaItems.length].type==='music'?(
+                <svg width="10" height="10" viewBox="0 0 24 24" fill={A.amber} style={{flexShrink:0}}><path d="M12 3v10.55A4 4 0 1014 17V7h4V3h-6z"/></svg>
+              ):(
+                <div style={{width:6,height:6,borderRadius:'50%',background:A.red,animation:'pulse 1.2s ease infinite',flexShrink:0}}/>
+              )}
+              <span style={{fontSize:15,color:mediaItems[mediaChipIdx%mediaItems.length].type==='music'?A.amber:D.t2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flexShrink:0,maxWidth:'30%'}}>
+                {mediaItems[mediaChipIdx%mediaItems.length].primary}{mediaItems[mediaChipIdx%mediaItems.length].secondary?` · ${mediaItems[mediaChipIdx%mediaItems.length].secondary}`:''}
+              </span>
+            </>
+          )}
+          {voiceTimer.active&&(
+            <>
+              {(urgentTickerItems.length>0||news.length>0||allSmartEvents.length>0||mediaItems.length>0)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
               <TimerCountdown voiceTimer={voiceTimer}/>
             </>
           )}
