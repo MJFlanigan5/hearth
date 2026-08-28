@@ -3128,19 +3128,23 @@ app.get('/api/plex/thumb', async (req, res) => {
 app.get('/api/music/now-playing', requireAuth, async (req, res) => {
   try {
     if (_lastfmCache && Date.now() - _lastfmCacheAt < 8000) return res.json(_lastfmCache);
-    // HA media player takes priority over Last.fm
+    // HA media players take priority over Last.fm — scan all speakers (not
+    // TVs) rather than one pinned entity, so it doesn't matter which Sonos
+    // zone is actually playing.
     const haUrl = (gs('ha_url') || '').replace(/\/$/, '');
     const haToken = gs('ha_token') || '';
-    const mediaEntity = (gs('ha_media_entity') || '').trim();
-    if (haUrl && haToken && mediaEntity) {
-      const r = await fetch(`${haUrl}/api/states/${mediaEntity}`, {
+    if (haUrl && haToken) {
+      const r = await fetch(`${haUrl}/api/states`, {
         headers: { Authorization: `Bearer ${haToken}` },
         signal: AbortSignal.timeout(5000),
       });
       if (r.ok) {
-        const state = await r.json();
-        if (state.state === 'playing') {
-          const attrs = state.attributes || {};
+        const states = await r.json();
+        const playing = Array.isArray(states)
+          ? states.find(s => s.entity_id?.startsWith('media_player.') && s.state === 'playing' && s.attributes?.media_content_type === 'music')
+          : null;
+        if (playing) {
+          const attrs = playing.attributes || {};
           const ep = attrs.entity_picture || '';
           _lastfmCache = { playing: true, title: attrs.media_title || '', artist: attrs.media_artist || '', thumb: ep.startsWith('http') ? ep : '' };
         } else {
@@ -4949,22 +4953,30 @@ function haWsConnect() {
       console.error('[ha-ws] auth invalid — check HA token'); _haWsRetryMs = 60000; _haWs.close();
     } else if (msg.type === 'event') {
       const { entity_id, new_state, old_state } = msg.event?.data || {};
-      if (!entity_id || !_haWsTracked().has(entity_id)) return;
-      const _g = k => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value || '';
-      const _mediaId = _g('ha_media_entity').trim();
-      // Media player: update now-playing cache directly; track changes appear as attribute-only changes
-      // so we bypass the state-equality guard for this entity
-      if (entity_id === _mediaId) {
-        if (new_state?.state === 'playing') {
+      if (!entity_id) return;
+      // Media players: react to any music-playing media_player entity (any
+      // Sonos zone can start/stop), bypassing the generic tracked-entity
+      // whitelist and the state-equality guard — track changes on a
+      // playing zone surface as attribute-only updates. Scoped to
+      // media_content_type 'music' so a TV/soundbar playing a movie doesn't
+      // get picked up as "now playing" music.
+      if (entity_id.startsWith('media_player.')) {
+        if (new_state?.state === 'playing' && new_state?.attributes?.media_content_type === 'music') {
           const attrs = new_state.attributes || {};
           const ep = attrs.entity_picture || '';
           _lastfmCache = { playing: true, title: attrs.media_title || '', artist: attrs.media_artist || '', thumb: ep.startsWith('http') ? ep : '' };
+          _lastfmCacheAt = Date.now();
         } else {
-          _lastfmCache = { playing: false };
+          // Not playing music (stopped, paused, or playing something that
+          // isn't music) — can't tell from a single event whether another
+          // zone is still playing, so invalidate and let the next poll
+          // re-scan all zones via REST.
+          _lastfmCacheAt = 0;
         }
-        _lastfmCacheAt = Date.now();
         return;
       }
+      if (!_haWsTracked().has(entity_id)) return;
+      const _g = k => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value || '';
       // Skip attribute-only changes for all other entities
       if (new_state?.state === old_state?.state) return;
       const _personIds = new Set(_g('ha_person_entities').split(',').map(s => s.trim()).filter(Boolean));
