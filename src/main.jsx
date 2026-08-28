@@ -745,6 +745,13 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
     insurance_company:'Insurance',policy_number:'Policy #',insurance_phone:'Insurance phone',
     doctor_name:'Doctor',doctor_phone:'Doctor phone',medical_notes:'Medical notes',extra_notes:'Notes'
   };
+  const emergencyFilled=useMemo(()=>Object.entries(dispEmergency).filter(([k,v])=>v&&String(v).trim()!==''&&EMERGENCY_LABELS[k]),[dispEmergency]);
+  const [emergencyChipIdx,setEmergencyChipIdx]=useState(0);
+  useEffect(()=>{
+    if(emergencyFilled.length<=1)return;
+    const id=setInterval(()=>setEmergencyChipIdx(i=>(i+1)%emergencyFilled.length),4000);
+    return()=>clearInterval(id);
+  },[emergencyFilled.length]);
 
   const [livePollVotes,setLivePollVotes]=useState({});
   useEffect(()=>{
@@ -1141,8 +1148,8 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
     sep:'rgba(255,255,255,0.07)',
   };
   const isTV=window.innerWidth>=1440;
-  const Widget=({children,style:s={}})=>(
-    <div style={{background:D.card,borderRadius:16,border:`1px solid ${D.border}`,padding:isTV?'18px 22px':'16px 18px',overflow:'hidden',...s}}>{children}</div>
+  const Widget=({children,style:s={},onClick})=>(
+    <div onClick={onClick} style={{background:D.card,borderRadius:16,border:`1px solid ${D.border}`,padding:isTV?'18px 22px':'16px 18px',overflow:'hidden',...s}}>{children}</div>
   );
   const WLabel=({children})=>(
     <div style={{fontSize:isTV?12:10,fontWeight:700,color:D.t3,textTransform:'uppercase',letterSpacing:'.10em',marginBottom:isTV?14:12}}>{children}</div>
@@ -2210,22 +2217,19 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
                         </div>
                       </>
                     )}
-                    {visiblePanelId==='w_emergency'&&emergencyHasValue&&(()=>{
-                      const filled=Object.entries(dispEmergency).filter(([k,v])=>v&&String(v).trim()!==''&&EMERGENCY_LABELS[k]);
-                      return(
-                        <>
-                          <WLabel>Emergency info</WLabel>
-                          <div style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column',gap:8,marginTop:4}}>
-                            {filled.map(([k,v])=>(
-                              <div key={k} style={{padding:'10px 14px',background:'rgba(255,255,255,0.05)',borderRadius:10}}>
-                                <div style={{fontSize:11,fontWeight:700,color:D.t3,textTransform:'uppercase',letterSpacing:'.06em'}}>{EMERGENCY_LABELS[k]}</div>
-                                <div style={{fontSize:isTV?17:14,color:D.t1,marginTop:3,lineHeight:1.4,whiteSpace:'pre-wrap'}}>{v}</div>
-                              </div>
-                            ))}
-                          </div>
-                        </>
-                      );
-                    })()}
+                    {visiblePanelId==='w_emergency'&&emergencyHasValue&&(
+                      <>
+                        <WLabel>Emergency info</WLabel>
+                        <div style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column',gap:8,marginTop:4}}>
+                          {emergencyFilled.map(([k,v])=>(
+                            <div key={k} style={{padding:'10px 14px',background:'rgba(255,255,255,0.05)',borderRadius:10}}>
+                              <div style={{fontSize:11,fontWeight:700,color:D.t3,textTransform:'uppercase',letterSpacing:'.06em'}}>{EMERGENCY_LABELS[k]}</div>
+                              <div style={{fontSize:isTV?17:14,color:D.t1,marginTop:3,lineHeight:1.4,whiteSpace:'pre-wrap'}}>{v}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
                     {visiblePanelId==='w_pets'&&urgentPetRecords.length>0&&(
                       <>
                         <WLabel>Pet care due</WLabel>
@@ -2366,6 +2370,17 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
                   <div style={{fontSize:13,color:D.t4}}>Loading…</div>
                 )}
               </Widget>
+              {/* Emergency info — always-visible, rotates through configured
+                  fields every 4s. Tap to expand full detail. Deliberately
+                  not in centerPanels or gated behind hover-only controls —
+                  in an emergency you shouldn't have to wait or walk up and
+                  poke around to see it. */}
+              {emergencyHasValue&&(
+                <Widget onClick={()=>setEmergencyForced(f=>!f)} style={{flexShrink:0,cursor:'pointer',border:`1px solid ${emergencyForced?A.red:'rgba(255,59,48,0.35)'}`,background:emergencyForced?'rgba(255,59,48,0.12)':undefined}}>
+                  <div style={{fontSize:10,fontWeight:700,color:A.red,textTransform:'uppercase',letterSpacing:'.08em',marginBottom:3}}>{EMERGENCY_LABELS[emergencyFilled[emergencyChipIdx%emergencyFilled.length]?.[0]]}</div>
+                  <div style={{fontSize:14,color:D.t1,fontWeight:600,lineHeight:1.3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{emergencyFilled[emergencyChipIdx%emergencyFilled.length]?.[1]}</div>
+                </Widget>
+              )}
               {/* Grocery — if items exist */}
               {(()=>{const unchecked=(grocery||[]).filter(g=>!g.checked);return unchecked.length>0&&(
                 <Widget style={{flexShrink:0}}>
@@ -2465,10 +2480,6 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
             </>
           )}
         </div>
-        {emergencyHasValue&&(
-          <button onClick={()=>setEmergencyForced(f=>!f)} style={{flexShrink:0,background:emergencyForced?A.red:'rgba(255,59,48,0.12)',color:emergencyForced?'#fff':A.red,border:`1px solid ${emergencyForced?A.red:'rgba(255,59,48,0.35)'}`,borderRadius:A.rPill,padding:'9px 16px',fontSize:13,fontWeight:700,cursor:'pointer',transition:'background .15s'}}
-          >{emergencyForced?'Close':'Emergency Info'}</button>
-        )}
         {quickActions.length>0&&quickActions.map(action=>{
           const st=qaState[action.id]||'idle';
           return(
