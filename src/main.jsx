@@ -2364,28 +2364,21 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
                 </Widget>
               )}
               {/* Media — music/sports, moved out of the bottom ticker into an
-                  always-visible rotating chip (mirrors the Emergency chip
-                  pattern above). Appears only when something's actually
+                  always-visible rotating banner (single line, like the old
+                  ticker segment). Appears only when something's actually
                   playing/live, rotates through items every 4s. */}
               {mediaItems.length>0&&(
-                <Widget style={{flexShrink:0}}>
-                  {mediaItems[mediaChipIdx%mediaItems.length].type==='music'?(
-                    <div style={{display:'flex',alignItems:'center',gap:8}}>
-                      {mediaItems[mediaChipIdx%mediaItems.length].thumb?<img src={mediaItems[mediaChipIdx%mediaItems.length].thumb} style={{width:28,height:28,borderRadius:4,objectFit:'cover',flexShrink:0}}/>:<svg width="16" height="16" viewBox="0 0 24 24" fill={A.amber} style={{flexShrink:0}}><path d="M12 3v10.55A4 4 0 1014 17V7h4V3h-6z"/></svg>}
-                      <div style={{overflow:'hidden'}}>
-                        <div style={{fontSize:10,fontWeight:700,color:D.t3,textTransform:'uppercase',letterSpacing:'.08em',marginBottom:2}}>Now Playing</div>
-                        <div style={{fontSize:14,color:D.t1,fontWeight:600,lineHeight:1.3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{mediaItems[mediaChipIdx%mediaItems.length].primary}{mediaItems[mediaChipIdx%mediaItems.length].secondary?` · ${mediaItems[mediaChipIdx%mediaItems.length].secondary}`:''}</div>
-                      </div>
-                    </div>
-                  ):(
-                    <div style={{display:'flex',alignItems:'center',gap:8}}>
+                <Widget style={{flexShrink:0,padding:'10px 14px'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:8,overflow:'hidden'}}>
+                    {mediaItems[mediaChipIdx%mediaItems.length].type==='music'?(
+                      mediaItems[mediaChipIdx%mediaItems.length].thumb?<img src={mediaItems[mediaChipIdx%mediaItems.length].thumb} style={{width:14,height:14,borderRadius:2,objectFit:'cover',flexShrink:0}}/>:<svg width="12" height="12" viewBox="0 0 24 24" fill={A.amber} style={{flexShrink:0}}><path d="M12 3v10.55A4 4 0 1014 17V7h4V3h-6z"/></svg>
+                    ):(
                       <div style={{width:6,height:6,borderRadius:'50%',background:A.red,animation:'pulse 1.2s ease infinite',flexShrink:0}}/>
-                      <div style={{overflow:'hidden'}}>
-                        <div style={{fontSize:10,fontWeight:700,color:D.t3,textTransform:'uppercase',letterSpacing:'.08em',marginBottom:2}}>Live</div>
-                        <div style={{fontSize:14,color:D.t1,fontWeight:600,lineHeight:1.3,fontVariantNumeric:'tabular-nums',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{mediaItems[mediaChipIdx%mediaItems.length].primary}{mediaItems[mediaChipIdx%mediaItems.length].secondary?<span style={{fontSize:12,color:D.t4,marginLeft:4}}>{mediaItems[mediaChipIdx%mediaItems.length].secondary}</span>:null}</div>
-                      </div>
-                    </div>
-                  )}
+                    )}
+                    <span style={{fontSize:14,color:mediaItems[mediaChipIdx%mediaItems.length].type==='music'?A.amber:D.t1,fontWeight:600,fontVariantNumeric:'tabular-nums',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                      {mediaItems[mediaChipIdx%mediaItems.length].primary}{mediaItems[mediaChipIdx%mediaItems.length].secondary?` · ${mediaItems[mediaChipIdx%mediaItems.length].secondary}`:''}
+                    </span>
+                  </div>
                 </Widget>
               )}
               {/* Grocery — if items exist */}
