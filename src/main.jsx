@@ -1318,37 +1318,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
                   </div>
                 </>
               ):(
-                // Left panel's empty-state fallback: Who's Home (live, always
-                // relevant) instead of Guest WiFi (only relevant when guests
-                // are actually present) — falls back to WiFi, then a plain
-                // empty state, if Who's Home has no data configured.
-                (widgetData.who_home?.persons?.length>0)?(()=>{
-                  const {persons=[]}=widgetData.who_home||{};
-                  const isHome=s=>s==='home';
-                  const stateLabel=s=>s==='home'?'Home':s==='not_home'?'Away':s?s.replace(/_/g,' '):'Unknown';
-                  const stateColor=s=>isHome(s)?A.green:s==='not_home'?D.t4:'#FF9500';
-                  const initials=n=>n.trim().split(/\s+/).map(w=>w[0]||'').join('').slice(0,2).toUpperCase()||'?';
-                  const homeCount=persons.filter(p=>isHome(p.state)).length;
-                  return(
-                    <>
-                      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10,flexShrink:0}}>
-                        <WLabel>Who's Home</WLabel>
-                        <span style={{fontSize:11,color:D.t4}}>{homeCount} of {persons.length} home</span>
-                      </div>
-                      <div style={{flex:1,display:'flex',flexDirection:'column',justifyContent:'center',gap:10}}>
-                        {persons.map(p=>(
-                          <div key={p.entity_id} style={{display:'flex',alignItems:'center',gap:12}}>
-                            <div style={{width:34,height:34,borderRadius:'50%',background:stateColor(p.state),opacity:isHome(p.state)?1:0.35,filter:p.state==='not_home'?'grayscale(1)':'none',animation:isHome(p.state)?'presenceGlow 2.4s ease-out infinite':'none',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
-                              <span style={{fontSize:13,fontWeight:700,color:'#fff'}}>{initials(p.name)}</span>
-                            </div>
-                            <span style={{fontSize:15,fontWeight:600,color:D.t1,flex:1}}>{p.name}</span>
-                            <span style={{fontSize:12,fontWeight:500,color:stateColor(p.state)}}>{stateLabel(p.state)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </>
-                  );
-                })():wifiQrData?(
+                wifiQrData?(
                   <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:8}}>
                     <WLabel>Guest WiFi</WLabel>
                     <img src={wifiQrData.dataUrl} alt="WiFi QR" style={{width:isTV?160:130,height:isTV?160:130,objectFit:'contain',borderRadius:10,display:'block'}}/>
