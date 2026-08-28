@@ -1053,12 +1053,15 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
     ...(urgentConsumables.length>0?['w_home_consumables']:[]),
     ...(urgentMaintenance.length>0?['w_home_maintenance']:[]),
     ...(urgentPetRecords.length>0?['w_pets']:[]),
-    ...(emergencyHasValue?['w_emergency']:[]),
     ...(activeSubCount>0?['w_subscriptions']:[]),
     ...(lowPantryItems.length>0?['w_pantry']:[]),
     ...(inProgressProjects.length>0?['w_projects']:[]),
   ];
-  const activePanelId=centerPanels[centerIdx%Math.max(1,centerPanels.length)];
+  // Emergency info no longer competes for a rotation slot — in an emergency
+  // you can't wait for the carousel to cycle to it. It's reachable instantly
+  // via a persistent button instead (see emergencyForced below).
+  const [emergencyForced,setEmergencyForced]=useState(false);
+  const activePanelId=emergencyForced?'w_emergency':centerPanels[centerIdx%Math.max(1,centerPanels.length)];
   useEffect(()=>{
     if(panelFirstRender.current){panelFirstRender.current=false;setVisiblePanelId(activePanelId);return;}
     clearTimeout(panelFadeTimer.current);
@@ -1303,7 +1306,37 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
                   </div>
                 </>
               ):(
-                wifiQrData?(
+                // Left panel's empty-state fallback: Who's Home (live, always
+                // relevant) instead of Guest WiFi (only relevant when guests
+                // are actually present) — falls back to WiFi, then a plain
+                // empty state, if Who's Home has no data configured.
+                (widgetData.who_home?.persons?.length>0)?(()=>{
+                  const {persons=[]}=widgetData.who_home||{};
+                  const isHome=s=>s==='home';
+                  const stateLabel=s=>s==='home'?'Home':s==='not_home'?'Away':s?s.replace(/_/g,' '):'Unknown';
+                  const stateColor=s=>isHome(s)?A.green:s==='not_home'?D.t4:'#FF9500';
+                  const initials=n=>n.trim().split(/\s+/).map(w=>w[0]||'').join('').slice(0,2).toUpperCase()||'?';
+                  const homeCount=persons.filter(p=>isHome(p.state)).length;
+                  return(
+                    <>
+                      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10,flexShrink:0}}>
+                        <WLabel>Who's Home</WLabel>
+                        <span style={{fontSize:11,color:D.t4}}>{homeCount} of {persons.length} home</span>
+                      </div>
+                      <div style={{flex:1,display:'flex',flexDirection:'column',justifyContent:'center',gap:10}}>
+                        {persons.map(p=>(
+                          <div key={p.entity_id} style={{display:'flex',alignItems:'center',gap:12}}>
+                            <div style={{width:34,height:34,borderRadius:'50%',background:stateColor(p.state),opacity:isHome(p.state)?1:0.35,filter:p.state==='not_home'?'grayscale(1)':'none',animation:isHome(p.state)?'presenceGlow 2.4s ease-out infinite':'none',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                              <span style={{fontSize:13,fontWeight:700,color:'#fff'}}>{initials(p.name)}</span>
+                            </div>
+                            <span style={{fontSize:15,fontWeight:600,color:D.t1,flex:1}}>{p.name}</span>
+                            <span style={{fontSize:12,fontWeight:500,color:stateColor(p.state)}}>{stateLabel(p.state)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  );
+                })():wifiQrData?(
                   <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:8}}>
                     <WLabel>Guest WiFi</WLabel>
                     <img src={wifiQrData.dataUrl} alt="WiFi QR" style={{width:isTV?160:130,height:isTV?160:130,objectFit:'contain',borderRadius:10,display:'block'}}/>
@@ -2371,7 +2404,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
           {urgentTickerItems.length>0&&(
             <>
               <div style={{width:6,height:6,borderRadius:'50%',background:A.red,animation:'pulse 1.2s ease infinite',flexShrink:0}}/>
-              <span style={{fontSize:12,color:A.red,fontWeight:700,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flexShrink:0,maxWidth:'32%',transition:'opacity .5s',opacity:urgentVisible?1:0}}>
+              <span style={{fontSize:15,color:A.red,fontWeight:700,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flexShrink:0,maxWidth:'32%',transition:'opacity .5s',opacity:urgentVisible?1:0}}>
                 {urgentTickerItems[urgentIdx%urgentTickerItems.length]}
               </span>
             </>
@@ -2380,7 +2413,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
             <>
               {urgentTickerItems.length>0&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
               <div style={{width:5,height:5,borderRadius:'50%',background:D.t4,flexShrink:0}}/>
-              <span style={{fontSize:12,color:D.t3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',transition:'opacity .5s',opacity:newsVisible?1:0}}>
+              <span style={{fontSize:15,color:D.t3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',transition:'opacity .5s',opacity:newsVisible?1:0}}>
                 {news[newsIdx%news.length]?.title}
               </span>
             </>
@@ -2389,7 +2422,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
             <>
               {(urgentTickerItems.length>0||news.length>0)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
               <div style={{width:6,height:6,borderRadius:'50%',background:A.blue,flexShrink:0}}/>
-              <span style={{fontSize:12,color:D.t2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flexShrink:0,maxWidth:'30%'}}>
+              <span style={{fontSize:15,color:D.t2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flexShrink:0,maxWidth:'30%'}}>
                 {allSmartEvents[0].icon} {allSmartEvents[0].title}{allSmartEvents[0].message?` · ${allSmartEvents[0].message}`:''}
               </span>
             </>
@@ -2400,8 +2433,8 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
               <div style={{width:6,height:6,borderRadius:'50%',background:A.red,animation:'pulse 1.2s ease infinite',flexShrink:0}}/>
               <div style={{display:'flex',alignItems:'center',gap:12,overflow:'hidden'}}>
                 {liveGames.slice(0,4).map((g,i)=>(
-                  <span key={g.id||i} style={{fontSize:12,color:D.t1,fontVariantNumeric:'tabular-nums',fontWeight:600,flexShrink:0}}>
-                    {g.away?.abbr} {g.away?.score}–{g.home?.score} {g.home?.abbr}{g.detail&&<span style={{fontSize:11,color:D.t4,marginLeft:3}}>{g.detail}</span>}
+                  <span key={g.id||i} style={{fontSize:15,color:D.t1,fontVariantNumeric:'tabular-nums',fontWeight:600,flexShrink:0}}>
+                    {g.away?.abbr} {g.away?.score}–{g.home?.score} {g.home?.abbr}{g.detail&&<span style={{fontSize:13,color:D.t4,marginLeft:3}}>{g.detail}</span>}
                     {i<Math.min(3,liveGames.length-1)&&<span style={{color:D.sep,marginLeft:8}}>·</span>}
                   </span>
                 ))}
@@ -2412,7 +2445,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
             <>
               {(urgentTickerItems.length>0||news.length>0||allSmartEvents.length>0||liveGames.length>0)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
               {nowPlaying.thumb?<img src={nowPlaying.thumb} style={{width:14,height:14,borderRadius:2,objectFit:'cover',flexShrink:0}}/>:<svg width="12" height="12" viewBox="0 0 24 24" fill={A.amber} style={{flexShrink:0}}><path d="M12 3v10.55A4 4 0 1014 17V7h4V3h-6z"/></svg>}
-              <span style={{fontSize:12,color:A.amber,fontWeight:600,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:'28%'}}>
+              <span style={{fontSize:15,color:A.amber,fontWeight:600,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:'28%'}}>
                 {nowPlaying.title}{nowPlaying.artist?` · ${nowPlaying.artist}`:''}
               </span>
             </>
@@ -2421,12 +2454,16 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
             <>
               {(urgentTickerItems.length>0||news.length>0||allSmartEvents.length>0||liveGames.length>0||nowPlaying.playing)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
               <svg width="12" height="12" viewBox="0 0 24 24" fill={A.blue} style={{flexShrink:0}}><path d="M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61l1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 1.42A8.962 8.962 0 0012 4c-4.97 0-9 4.03-9 9s4.02 9 9 9a9 9 0 006.03-15.61zM12 20c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"/></svg>
-              <span style={{fontSize:12,color:A.blue,fontWeight:600,flexShrink:0}}>
+              <span style={{fontSize:15,color:A.blue,fontWeight:600,flexShrink:0}}>
                 {timerRemaining==='paused'?'Timer paused':`Timer · ${timerRemaining} left`}
               </span>
             </>
           )}
         </div>
+        {emergencyHasValue&&(
+          <button onClick={()=>setEmergencyForced(f=>!f)} style={{flexShrink:0,background:emergencyForced?A.red:'rgba(255,59,48,0.12)',color:emergencyForced?'#fff':A.red,border:`1px solid ${emergencyForced?A.red:'rgba(255,59,48,0.35)'}`,borderRadius:A.rPill,padding:'9px 16px',fontSize:13,fontWeight:700,cursor:'pointer',transition:'background .15s'}}
+          >{emergencyForced?'Close':'Emergency Info'}</button>
+        )}
         {quickActions.length>0&&quickActions.map(action=>{
           const st=qaState[action.id]||'idle';
           return(
