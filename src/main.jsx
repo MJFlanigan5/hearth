@@ -159,6 +159,78 @@ function useClock(){
   useEffect(()=>{const id=setInterval(()=>setT(new Date()),1000);return()=>clearInterval(id);},[]);
   return t;
 }
+// Ticks internally every second but only triggers a re-render when the
+// minute actually changes — for components that need "now" for
+// minute-granularity checks (night-mode window, "starts in 2hrs" filters)
+// without re-rendering their whole subtree every second like useClock does.
+function useMinuteClock(){
+  const [t,setT]=useState(new Date());
+  const minRef=useRef(t.getMinutes());
+  useEffect(()=>{
+    const id=setInterval(()=>{
+      const d=new Date();
+      if(d.getMinutes()!==minRef.current){minRef.current=d.getMinutes();setT(d);}
+    },1000);
+    return()=>clearInterval(id);
+  },[]);
+  return t;
+}
+// Digital clock digits — isolated so its 1s tick only re-renders this small
+// subtree, not the whole DisplayMode tree (was the root cause of visible
+// flashing across the display on every clock tick).
+function ClockDigits({variant,isMobile,isTV}){
+  const now=useClock();
+  const h12=now.getHours()%12||12;
+  const min=String(now.getMinutes()).padStart(2,'0');
+  const ampm=now.getHours()>=12?'PM':'AM';
+  if(variant==='night') return(
+    <div style={{display:'flex',alignItems:'baseline',gap:10}}>
+      <span style={{fontSize:isMobile?80:148,fontWeight:800,color:'rgba(255,255,255,0.82)',lineHeight:1,letterSpacing:'-0.04em',fontVariantNumeric:'tabular-nums'}}>{h12}:{min}</span>
+      <span style={{fontSize:isMobile?24:38,color:'rgba(255,255,255,0.32)',fontWeight:400}}>{ampm}</span>
+    </div>
+  );
+  return(
+    <div style={{display:'flex',alignItems:'baseline',gap:8}}>
+      <span style={{fontSize:isMobile?64:isTV?140:108,fontWeight:800,color:'#FFFFFF',lineHeight:1,letterSpacing:'-0.04em',fontVariantNumeric:'tabular-nums'}}>{h12}:{min}</span>
+      <span style={{fontSize:isMobile?18:isTV?36:28,color:'rgba(255,255,255,0.38)',fontWeight:400,marginBottom:isMobile?6:isTV?14:10}}>{ampm}</span>
+    </div>
+  );
+}
+function ClockDate({variant,isMobile,isTV,style}){
+  const now=useClock();
+  const dateStr=`${DAYS[now.getDay()]}, ${MONTHS[now.getMonth()]} ${now.getDate()}`;
+  if(variant==='night') return(
+    <div style={{fontSize:isMobile?15:20,color:'rgba(255,255,255,0.32)',fontWeight:400,letterSpacing:'-.01em',marginTop:10}}>{dateStr}</div>
+  );
+  return(
+    <div style={{fontSize:isMobile?14:isTV?26:20,color:'rgba(255,255,255,0.65)',fontWeight:400,letterSpacing:'-.01em',...style}}>{dateStr}</div>
+  );
+}
+// Voice-timer countdown text — isolated for the same reason as ClockDigits;
+// only relevant while a timer is active, but the ticker segment needs
+// second-level precision so it can't share DisplayMode's minute clock.
+function TimerCountdown({voiceTimer}){
+  const now=useClock();
+  const remaining=useMemo(()=>{
+    if(voiceTimer.paused) return 'paused';
+    if(!voiceTimer.finishes_at) return voiceTimer.remaining||null;
+    const ms=new Date(voiceTimer.finishes_at).getTime()-now.getTime();
+    if(ms<=0) return '0:00';
+    const totalSec=Math.floor(ms/1000);
+    const h=Math.floor(totalSec/3600);
+    const m=Math.floor((totalSec%3600)/60);
+    const s=totalSec%60;
+    return h>0?`${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${m}:${String(s).padStart(2,'0')}`;
+  },[voiceTimer,now]);
+  return(
+    <>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill={A.blue} style={{flexShrink:0}}><path d="M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61l1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 1.42A8.962 8.962 0 0012 4c-4.97 0-9 4.03-9 9s4.02 9 9 9a9 9 0 006.03-15.61zM12 20c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"/></svg>
+      <span style={{fontSize:15,color:A.blue,fontWeight:600,flexShrink:0}}>
+        {remaining==='paused'?'Timer paused':`Timer · ${remaining} left`}
+      </span>
+    </>
+  );
+}
 function useToast(){
   const [toasts,setToasts]=useState([]);
   const add=useCallback((msg,type='green')=>{
@@ -710,7 +782,7 @@ function PresenceBar({duration,color}){
 /* ── Display Mode ────────────────────────────────────────────────────── */
 function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGrocery,countdowns,photos=[],weather,clockFormat='12h',nightModeStart='23:00',nightModeEnd='06:00',goals=[],notes=[],polls=[],rotationMs=10000,wifiQrData=null,quickActions=[],members=[],packages=[],setPackages,messages=[],setMessages,appliances=[],consumables=[],maintenanceItems=[],pets=[],subscriptions=[],pantry=[],projects=[]}){
   const isMobile=useIsMobile();
-  const now=useClock();
+  const now=useMinuteClock();
   const [liveGames,setLiveGames]=useState([]);
   useEffect(()=>{
     const load=()=>api.get('/api/sports').then(d=>{if(Array.isArray(d))setLiveGames(d.filter(g=>g.state==='in'));}).catch(()=>{});
@@ -816,18 +888,6 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
     return()=>{cancelled=true;clearInterval(fa);clearInterval(fb);clearInterval(fc);clearTimeout(reconnectTimer);es?.close();};
   },[]);
   const allSmartEvents=useMemo(()=>[...smEvents,...haEvents].sort((a,b)=>new Date(b.created_at?.replace(' ','T'))-new Date(a.created_at?.replace(' ','T'))).slice(0,10),[smEvents,haEvents]);
-  const timerRemaining=useMemo(()=>{
-    if(!voiceTimer.active) return null;
-    if(voiceTimer.paused) return 'paused';
-    if(!voiceTimer.finishes_at) return voiceTimer.remaining||null;
-    const ms=new Date(voiceTimer.finishes_at).getTime()-now.getTime();
-    if(ms<=0) return '0:00';
-    const totalSec=Math.floor(ms/1000);
-    const h=Math.floor(totalSec/3600);
-    const m=Math.floor((totalSec%3600)/60);
-    const s=totalSec%60;
-    return h>0?`${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${m}:${String(s).padStart(2,'0')}`;
-  },[voiceTimer,now]);
   const [nowPlaying,setNowPlaying]=useState({playing:false});
   const [qaState,setQaState]=useState({});
   useEffect(()=>{
@@ -916,10 +976,6 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
     },200);
     return()=>{clearTimeout(t);clearInterval(s.timer);clearTimeout(s.pauseT);clearTimeout(s.unPauseT);};
   },[events]);
-  const h12=now.getHours()%12||12;
-  const min=String(now.getMinutes()).padStart(2,'0');
-  const ampm=now.getHours()>=12?'PM':'AM';
-  const dateStr=`${DAYS[now.getDay()]}, ${MONTHS[now.getMonth()]} ${now.getDate()}`;
 
   // Photo frame — cycles every 12s when photos are present
   const [photoIdx,setPhotoIdx]=useState(0);
@@ -1169,11 +1225,8 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
 
   if(isNightMode) return(
     <div onClick={dismissNight} style={{width:'100vw',height:'100vh',background:D.bg,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',cursor:'pointer',userSelect:'none',position:'relative'}}>
-      <div style={{display:'flex',alignItems:'baseline',gap:10}}>
-        <span style={{fontSize:isMobile?80:148,fontWeight:800,color:'rgba(255,255,255,0.82)',lineHeight:1,letterSpacing:'-0.04em',fontVariantNumeric:'tabular-nums'}}>{h12}:{min}</span>
-        <span style={{fontSize:isMobile?24:38,color:'rgba(255,255,255,0.32)',fontWeight:400}}>{ampm}</span>
-      </div>
-      <div style={{fontSize:isMobile?15:20,color:'rgba(255,255,255,0.32)',fontWeight:400,letterSpacing:'-.01em',marginTop:10}}>{dateStr}</div>
+      <ClockDigits variant="night" isMobile={isMobile}/>
+      <ClockDate variant="night" isMobile={isMobile}/>
       {weather&&<div style={{fontSize:isMobile?13:16,color:'rgba(255,255,255,0.22)',marginTop:10}}>{weather.temp}° · {weather.condition}</div>}
       <div style={{position:'absolute',bottom:28,fontSize:11,color:'rgba(255,255,255,0.14)',fontFamily:'JetBrains Mono,monospace',letterSpacing:'.10em',textTransform:'uppercase'}}>tap to wake</div>
     </div>
@@ -1208,12 +1261,9 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
       )}
       {/* Header — clock + date */}
       <div style={{display:'flex',alignItems:'flex-end',justifyContent:'space-between',flexShrink:0}}>
-        <div style={{display:'flex',alignItems:'baseline',gap:8}}>
-          <span style={{fontSize:isMobile?64:isTV?140:108,fontWeight:800,color:D.t1,lineHeight:1,letterSpacing:'-0.04em',fontVariantNumeric:'tabular-nums'}}>{h12}:{min}</span>
-          <span style={{fontSize:isMobile?18:isTV?36:28,color:D.t3,fontWeight:400,marginBottom:isMobile?6:isTV?14:10}}>{ampm}</span>
-        </div>
+        <ClockDigits variant="main" isMobile={isMobile} isTV={isTV}/>
         <div style={{textAlign:'right',paddingBottom:8}}>
-          <div style={{fontSize:isMobile?14:isTV?26:20,color:D.t2,fontWeight:400,letterSpacing:'-.01em'}}>{dateStr}</div>
+          <ClockDate variant="main" isMobile={isMobile} isTV={isTV}/>
           <div style={{fontSize:isTV?14:12,color:D.t4,marginTop:5,display:'flex',alignItems:'center',gap:5,justifyContent:'flex-end',fontFamily:'JetBrains Mono,monospace'}}>
             <div style={{width:5,height:5,borderRadius:'50%',background:online?A.green:A.red}}/>{online?'synced':'offline'}
           </div>
@@ -2450,10 +2500,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
           {voiceTimer.active&&(
             <>
               {(urgentTickerItems.length>0||news.length>0||allSmartEvents.length>0)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
-              <svg width="12" height="12" viewBox="0 0 24 24" fill={A.blue} style={{flexShrink:0}}><path d="M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61l1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 1.42A8.962 8.962 0 0012 4c-4.97 0-9 4.03-9 9s4.02 9 9 9a9 9 0 006.03-15.61zM12 20c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"/></svg>
-              <span style={{fontSize:15,color:A.blue,fontWeight:600,flexShrink:0}}>
-                {timerRemaining==='paused'?'Timer paused':`Timer · ${timerRemaining} left`}
-              </span>
+              <TimerCountdown voiceTimer={voiceTimer}/>
             </>
           )}
         </div>
