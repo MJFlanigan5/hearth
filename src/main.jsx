@@ -32,6 +32,20 @@ function daysUntil(dateStr){
   return Math.round((new Date(dateStr+'T00:00:00')-t)/86400000);
 }
 
+// Parses event time strings like "2:30 PM" into minutes-since-midnight.
+// Returns null for "All day" or unparseable values.
+function eventTimeMinutes(timeStr){
+  if(!timeStr||timeStr==='All day') return null;
+  const m=timeStr.match(/(\d+):(\d+)\s*(AM|PM)/i);
+  if(!m) return null;
+  let h=parseInt(m[1],10);
+  const min=parseInt(m[2],10);
+  const isPM=m[3].toUpperCase()==='PM';
+  if(isPM&&h!==12) h+=12;
+  if(!isPM&&h===12) h=0;
+  return h*60+min;
+}
+
 /* ── Recurring "Name (birthYear)" → "Name (age)" title rendering ─────────
    Idea borrowed from Timeframe (github.com/timeframe/ha-addon) — a
    recurring annual event titled e.g. "Ada (1990)" auto-displays as
@@ -1055,6 +1069,44 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
     },380);
     return()=>clearTimeout(panelFadeTimer.current);
   },[activePanelId]);
+
+  // Urgent ticker items — packages due/overdue, events starting within 2hrs,
+  // overdue chores. These shouldn't have to wait their turn in centerPanels'
+  // round-robin rotation, so they get their own always-checked ticker slot.
+  const overdueChores=useMemo(()=>chores.filter(c=>c.status==='overdue'&&!c.done),[chores]);
+  const packagesDueToday=useMemo(()=>packages.filter(p=>p.expected_date&&daysUntil(p.expected_date)<=0),[packages]);
+  const eventsSoon=useMemo(()=>{
+    const nowMin=now.getHours()*60+now.getMinutes();
+    return events.filter(e=>{
+      if(e.date!==todayStr) return false;
+      const em=eventTimeMinutes(e.time);
+      if(em===null) return false;
+      const diff=em-nowMin;
+      return diff>=0&&diff<=120;
+    });
+  },[events,todayStr,now]);
+  const urgentTickerItems=useMemo(()=>{
+    const items=[];
+    if(overdueChores.length===1) items.push(`🧹 "${overdueChores[0].name}" is overdue`);
+    else if(overdueChores.length>1) items.push(`🧹 ${overdueChores.length} chores overdue`);
+    if(packagesDueToday.length===1){
+      const p=packagesDueToday[0];
+      items.push(`📦 ${p.description||p.carrier||'Package'} arriving today`);
+    } else if(packagesDueToday.length>1) items.push(`📦 ${packagesDueToday.length} packages arriving today`);
+    eventsSoon.forEach(e=>items.push(`⏰ ${e.title} at ${e.time}`));
+    return items;
+  },[overdueChores,packagesDueToday,eventsSoon]);
+  const [urgentIdx,setUrgentIdx]=useState(0);
+  const [urgentVisible,setUrgentVisible]=useState(true);
+  const urgentFadeTimer=useRef(null);
+  useEffect(()=>{
+    if(urgentTickerItems.length<=1)return;
+    const id=setInterval(()=>{
+      setUrgentVisible(false);
+      urgentFadeTimer.current=setTimeout(()=>{setUrgentIdx(i=>(i+1)%urgentTickerItems.length);setUrgentVisible(true);},500);
+    },8000);
+    return()=>{clearInterval(id);clearTimeout(urgentFadeTimer.current);};
+  },[urgentTickerItems.length]);
 
   const [dmChoreConfetti,setDmChoreConfetti]=useState(false);
   const _choreSubmitting=useRef(new Set());
@@ -2316,8 +2368,17 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
       {/* Activity bar — news ticker + smart home events + live scores + manage */}
       <div style={{flexShrink:0,display:'flex',alignItems:'center',gap:12}}>
         <div style={{flex:1,minWidth:0,display:'flex',alignItems:'center',gap:10,overflow:'hidden'}}>
+          {urgentTickerItems.length>0&&(
+            <>
+              <div style={{width:6,height:6,borderRadius:'50%',background:A.red,animation:'pulse 1.2s ease infinite',flexShrink:0}}/>
+              <span style={{fontSize:12,color:A.red,fontWeight:700,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flexShrink:0,maxWidth:'32%',transition:'opacity .5s',opacity:urgentVisible?1:0}}>
+                {urgentTickerItems[urgentIdx%urgentTickerItems.length]}
+              </span>
+            </>
+          )}
           {news.length>0&&(
             <>
+              {urgentTickerItems.length>0&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
               <div style={{width:5,height:5,borderRadius:'50%',background:D.t4,flexShrink:0}}/>
               <span style={{fontSize:12,color:D.t3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',transition:'opacity .5s',opacity:newsVisible?1:0}}>
                 {news[newsIdx%news.length]?.title}
@@ -2326,7 +2387,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
           )}
           {allSmartEvents.length>0&&(
             <>
-              {news.length>0&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
+              {(urgentTickerItems.length>0||news.length>0)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
               <div style={{width:6,height:6,borderRadius:'50%',background:A.blue,flexShrink:0}}/>
               <span style={{fontSize:12,color:D.t2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flexShrink:0,maxWidth:'30%'}}>
                 {allSmartEvents[0].icon} {allSmartEvents[0].title}{allSmartEvents[0].message?` · ${allSmartEvents[0].message}`:''}
@@ -2335,7 +2396,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
           )}
           {liveGames.length>0&&(
             <>
-              {(news.length>0||allSmartEvents.length>0)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
+              {(urgentTickerItems.length>0||news.length>0||allSmartEvents.length>0)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
               <div style={{width:6,height:6,borderRadius:'50%',background:A.red,animation:'pulse 1.2s ease infinite',flexShrink:0}}/>
               <div style={{display:'flex',alignItems:'center',gap:12,overflow:'hidden'}}>
                 {liveGames.slice(0,4).map((g,i)=>(
@@ -2349,7 +2410,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
           )}
           {nowPlaying.playing&&(
             <>
-              {(news.length>0||allSmartEvents.length>0||liveGames.length>0)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
+              {(urgentTickerItems.length>0||news.length>0||allSmartEvents.length>0||liveGames.length>0)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
               {nowPlaying.thumb?<img src={nowPlaying.thumb} style={{width:14,height:14,borderRadius:2,objectFit:'cover',flexShrink:0}}/>:<svg width="12" height="12" viewBox="0 0 24 24" fill={A.amber} style={{flexShrink:0}}><path d="M12 3v10.55A4 4 0 1014 17V7h4V3h-6z"/></svg>}
               <span style={{fontSize:12,color:A.amber,fontWeight:600,flexShrink:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:'28%'}}>
                 {nowPlaying.title}{nowPlaying.artist?` · ${nowPlaying.artist}`:''}
@@ -2358,7 +2419,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
           )}
           {voiceTimer.active&&(
             <>
-              {(news.length>0||allSmartEvents.length>0||liveGames.length>0||nowPlaying.playing)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
+              {(urgentTickerItems.length>0||news.length>0||allSmartEvents.length>0||liveGames.length>0||nowPlaying.playing)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
               <svg width="12" height="12" viewBox="0 0 24 24" fill={A.blue} style={{flexShrink:0}}><path d="M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61l1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 1.42A8.962 8.962 0 0012 4c-4.97 0-9 4.03-9 9s4.02 9 9 9a9 9 0 006.03-15.61zM12 20c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"/></svg>
               <span style={{fontSize:12,color:A.blue,fontWeight:600,flexShrink:0}}>
                 {timerRemaining==='paused'?'Timer paused':`Timer · ${timerRemaining} left`}
