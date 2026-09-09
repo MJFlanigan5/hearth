@@ -2465,7 +2465,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
             <>
               {urgentTickerItems.length>0&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
               <div style={{width:5,height:5,borderRadius:'50%',background:D.t4,flexShrink:0}}/>
-              <span style={{fontSize:15,color:D.t3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',transition:'opacity .5s',opacity:newsVisible?1:0}}>
+              <span style={{fontSize:15,color:D.t3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',minWidth:0,maxWidth:'30%',transition:'opacity .5s',opacity:newsVisible?1:0}}>
                 {news[newsIdx%news.length]?.title}
               </span>
             </>
