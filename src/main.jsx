@@ -2456,7 +2456,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
           {urgentTickerItems.length>0&&(
             <>
               <div style={{width:6,height:6,borderRadius:'50%',background:A.red,animation:'pulse 1.2s ease infinite',flexShrink:0}}/>
-              <span style={{fontSize:15,color:A.red,fontWeight:700,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flexShrink:0,maxWidth:'32%',transition:'opacity .5s',opacity:urgentVisible?1:0}}>
+              <span style={{fontSize:15,color:A.red,fontWeight:700,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flexShrink:0,minWidth:0,maxWidth:'32%',transition:'opacity .5s',opacity:urgentVisible?1:0}}>
                 {urgentTickerItems[urgentIdx%urgentTickerItems.length]}
               </span>
             </>
@@ -2474,7 +2474,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
             <>
               {(urgentTickerItems.length>0||news.length>0)&&<span style={{color:D.sep,flexShrink:0}}>·</span>}
               <div style={{width:6,height:6,borderRadius:'50%',background:A.blue,flexShrink:0}}/>
-              <span style={{fontSize:15,color:D.t2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flexShrink:0,maxWidth:'30%'}}>
+              <span style={{fontSize:15,color:D.t2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flexShrink:0,minWidth:0,maxWidth:'30%'}}>
                 {allSmartEvents[0].icon} {allSmartEvents[0].title}{allSmartEvents[0].message?` · ${allSmartEvents[0].message}`:''}
               </span>
             </>
@@ -2487,7 +2487,7 @@ function DisplayMode({onManage,events,chores,setChores,meals=[],grocery,setGroce
               ):(
                 <div style={{width:6,height:6,borderRadius:'50%',background:A.red,animation:'pulse 1.2s ease infinite',flexShrink:0}}/>
               )}
-              <span style={{fontSize:15,color:mediaItems[mediaChipIdx%mediaItems.length].type==='music'?A.amber:D.t2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flexShrink:0,maxWidth:'30%'}}>
+              <span style={{fontSize:15,color:mediaItems[mediaChipIdx%mediaItems.length].type==='music'?A.amber:D.t2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flexShrink:0,minWidth:0,maxWidth:'30%'}}>
                 {mediaItems[mediaChipIdx%mediaItems.length].primary}{mediaItems[mediaChipIdx%mediaItems.length].secondary?` · ${mediaItems[mediaChipIdx%mediaItems.length].secondary}`:''}
               </span>
             </>
